@@ -892,7 +892,7 @@ function TabTendencias() {
       <svg viewBox="0 0 100 100" width={86} height={86}>
         {s1 && <path d={s1} fill={BORDO}/>}
         {s2 && <path d={s2} fill={MARFIL_DARK}/>}
-        {s3 && <path d={s3} fill={MARFIL} stroke="#ddd" strokeWidth="0.5"/>}
+        {s3 && <path d={s3} fill="#2d7bb8" stroke="#ddd" strokeWidth="0.5"/>}
         <circle cx={cx} cy={cy} r={22} fill="white"/>
         <text x={cx} y={cy-4} textAnchor="middle" fontSize={8} fill="#888">{maxSub}</text>
         <text x={cx} y={cy+8} textAnchor="middle" fontSize={12} fontWeight="bold" fill={BORDO}>
@@ -956,12 +956,12 @@ return (
                   {[
                     { label:`${stats.partido?.localN}`, color:BORDO, votos:stats.votos.local },
                     { label:"Empate", color:MARFIL_DARK, votos:stats.votos.empate },
-                    { label:`${stats.partido?.visitaN}`, color:"#ccc", votos:stats.votos.visita },
+                    { label:`${stats.partido?.visitaN}`, color:"#2d7bb8", votos:stats.votos.visita },
                   ].map(row => (
                     <div key={row.label} style={{ display:"flex", alignItems:"center",
                       gap:7, marginBottom:8 }}>
                       <div style={{ width:10, height:10, borderRadius:"50%",
-                        background:row.color, border: row.color==="#ccc"?"1px solid #bbb":"none",
+                        background:row.color, border:"none",
                         flexShrink:0 }}/>
                       <div style={{ fontSize:11, color:"#555", flex:1 }}>{row.label}</div>
                       <div style={{ fontSize:13, fontWeight:700, color:BORDO }}>
