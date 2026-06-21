@@ -1440,6 +1440,7 @@ function FormResultado({ partidos, onClose }: { partidos:any[], onClose:()=>void
 
   function elegirPartido(id: string) {
     setMatchId(id);
+    setConfirmCorregir(false);
     const p = partidos.find(x => x.id === id);
     if (p && p.gL !== undefined && p.gL !== null) {
       setGL(String(p.gL));
