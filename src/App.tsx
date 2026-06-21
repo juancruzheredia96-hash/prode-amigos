@@ -202,6 +202,26 @@ async function calcularPuntosPredicciones(resultados: Record<string,string>) {
 }
 
 
+async function revertirPuntosPartido(matchId: string) {
+  const pronosSnap = await getDocs(collection(db, "pronosticos"));
+  const delPartido = pronosSnap.docs.filter(d => d.data().matchId === matchId && d.data().calculado === true);
+  for (const pDoc of delPartido) {
+    const { userId, pts } = pDoc.data();
+    if (!pts) continue;
+    const userRef = doc(db, "usuarios", userId);
+    const userSnap = await getDoc(userRef);
+    if (!userSnap.exists()) continue;
+    const ud = userSnap.data();
+    const esExacto = pts === 3;
+    await setDoc(userRef, {
+      pts: Math.max(0, (ud.pts || 0) - pts),
+      hoy: Math.max(0, (ud.hoy || 0) - pts),
+      exactos: esExacto ? Math.max(0, (ud.exactos || 0) - 1) : (ud.exactos || 0),
+    }, { merge: true });
+    await setDoc(pDoc.ref, { pts: null, calculado: false }, { merge: true });
+  }
+}
+
 async function calcularPuntosPartido(matchId: string, gL: number, gV: number) {
   const pronosSnap = await getDocs(collection(db, "pronosticos"));
   const delPartido = pronosSnap.docs.filter(d => d.data().matchId === matchId);
@@ -1413,36 +1433,84 @@ function FormResultado({ partidos, onClose }: { partidos:any[], onClose:()=>void
   const [gV, setGV] = useState("");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
-  const sinResultado = partidos.filter(p => p.gL===undefined||p.gL===null);
+  const [confirmCorregir, setConfirmCorregir] = useState(false);
+
+  const partidoSeleccionado = partidos.find(p => p.id === matchId);
+  const yaTieneResultado = partidoSeleccionado && partidoSeleccionado.gL !== undefined && partidoSeleccionado.gL !== null;
+
+  function elegirPartido(id: string) {
+    setMatchId(id);
+    setConfirmCorregir(false);
+    const p = partidos.find(x => x.id === id);
+    if (p && p.gL !== undefined && p.gL !== null) {
+      setGL(String(p.gL));
+      setGV(String(p.gV));
+    } else {
+      setGL(""); setGV("");
+    }
+  }
 
   async function guardar() {
     if (!matchId||gL===""||gV==="") return;
+    if (yaTieneResultado && !confirmCorregir) return;
     setSaving(true);
     const gLNum=parseInt(gL), gVNum=parseInt(gV);
+    if (yaTieneResultado) {
+      setMsg("Revirtiendo puntos anteriores...");
+      await revertirPuntosPartido(matchId);
+    }
     await setDoc(doc(db,"partidos",matchId), { gL:gLNum, gV:gVNum }, { merge:true });
+    setMsg("Calculando puntos...");
     await calcularPuntosPartido(matchId, gLNum, gVNum);
-    setMsg("✓ Resultado guardado y puntos calculados");
-    setMatchId(""); setGL(""); setGV(""); setSaving(false);
+    setMsg(yaTieneResultado ? "✓ Resultado corregido y puntos recalculados" : "✓ Resultado guardado y puntos calculados");
+    setMatchId(""); setGL(""); setGV(""); setSaving(false); setConfirmCorregir(false);
     setTimeout(()=>setMsg(""),4000);
   }
 
   return (
     <div style={{ background:"white", borderRadius:12, border:"0.5px solid #e0ddd5", padding:14, marginBottom:10 }}>
-      <div style={{ fontSize:12, fontWeight:600, color:BORDO, marginBottom:10 }}>✏️ Cargar resultado</div>
+      <div style={{ fontSize:12, fontWeight:600, color:BORDO, marginBottom:10 }}>✏️ Cargar / corregir resultado</div>
       <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
         <div><div style={{ fontSize:10, color:"#888", marginBottom:3 }}>Partido</div>
-          <select value={matchId} onChange={e=>setMatchId(e.target.value)} style={{...inputStyle(),padding:"0 6px"}}>
+          <select value={matchId} onChange={e=>elegirPartido(e.target.value)} style={{...inputStyle(),padding:"0 6px"}}>
             <option value="">Seleccioná un partido...</option>
-            {sinResultado.map(p=><option key={p.id} value={p.id}>{p.localN} vs {p.visitaN} ({p.fecha})</option>)}
+            {partidos.map(p=>{
+              const tiene = p.gL !== undefined && p.gL !== null;
+              return <option key={p.id} value={p.id}>
+                {tiene ? "✓ " : ""}{p.localN} vs {p.visitaN} ({p.fecha}){tiene ? ` — ${p.gL}-${p.gV}` : ""}
+              </option>;
+            })}
           </select></div>
+
+        {yaTieneResultado && (
+          <div style={{ background:"#fff8e1", border:"0.5px solid #f57f17", borderRadius:6,
+            padding:"8px 10px", fontSize:11, color:"#f57f17" }}>
+            ⚠️ Este partido ya tiene resultado cargado ({partidoSeleccionado.gL}-{partidoSeleccionado.gV}).
+            Si lo cambiás, se revierten los puntos anteriores y se recalculan con el nuevo marcador.
+          </div>
+        )}
+
         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
           <div><div style={{ fontSize:10, color:"#888", marginBottom:3 }}>Goles local</div>
-            <input type="number" min="0" max="20" value={gL} onChange={e=>setGL(e.target.value)} placeholder="0" style={{...inputStyle(),textAlign:"center"}} /></div>
+            <input type="number" min="0" max="20" value={gL} onChange={e=>{setGL(e.target.value); setConfirmCorregir(false);}} placeholder="0" style={{...inputStyle(),textAlign:"center"}} /></div>
           <div><div style={{ fontSize:10, color:"#888", marginBottom:3 }}>Goles visitante</div>
-            <input type="number" min="0" max="20" value={gV} onChange={e=>setGV(e.target.value)} placeholder="0" style={{...inputStyle(),textAlign:"center"}} /></div>
+            <input type="number" min="0" max="20" value={gV} onChange={e=>{setGV(e.target.value); setConfirmCorregir(false);}} placeholder="0" style={{...inputStyle(),textAlign:"center"}} /></div>
         </div>
-        <button onClick={guardar} disabled={saving||!matchId||gL===""||gV===""} style={{ background:BORDO, color:MARFIL, border:"none", borderRadius:6, padding:10, fontSize:13, fontWeight:600, opacity:(!matchId||gL===""||gV==="")?0.4:1 }}>
-          {saving?"Guardando...":"Guardar resultado"}</button>
+
+        {yaTieneResultado && !confirmCorregir ? (
+          <button onClick={()=>setConfirmCorregir(true)} disabled={!matchId||gL===""||gV===""}
+            style={{ background:"#f57f17", color:"white", border:"none", borderRadius:6, padding:10, fontSize:13, fontWeight:600, opacity:(!matchId||gL===""||gV==="")?0.4:1 }}>
+            Confirmar corrección de resultado
+          </button>
+        ) : (
+          <button onClick={guardar} disabled={saving||!matchId||gL===""||gV===""} style={{ background:BORDO, color:MARFIL, border:"none", borderRadius:6, padding:10, fontSize:13, fontWeight:600, opacity:(!matchId||gL===""||gV==="")?0.4:1 }}>
+            {saving?"Guardando...":(yaTieneResultado ? "Sí, corregir y recalcular" : "Guardar resultado")}</button>
+        )}
+        {yaTieneResultado && confirmCorregir && (
+          <button onClick={()=>setConfirmCorregir(false)} style={{ background:"none", border:"1px solid #ccc", borderRadius:6, padding:8, fontSize:11, color:"#666" }}>
+            Cancelar corrección
+          </button>
+        )}
         {msg&&<div style={{ color:VERDE, fontSize:12, textAlign:"center" }}>{msg}</div>}
         <button onClick={onClose} style={{ background:"none", border:"none", fontSize:11, color:"#888" }}>Cerrar</button>
       </div>
