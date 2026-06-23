@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { initializeApp } from "firebase/app";
 import {
   getFirestore, doc, setDoc, getDoc, collection,
-  onSnapshot, query, orderBy, serverTimestamp, deleteDoc, addDoc, getDocs
+  onSnapshot, query, orderBy, where, serverTimestamp, deleteDoc, addDoc, getDocs
 } from "firebase/firestore";
 import {
   getAuth, signInWithPopup, GoogleAuthProvider,
@@ -92,7 +92,8 @@ const JUGADORES_BASE: Record<string, string[]> = {
 const css = `
   @import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&display=swap');
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: 'Barlow', sans-serif; background: #eaf4fc; min-height: 100vh; display: flex; justify-content: center; margin: 0; }
+  html { overflow-x: hidden; width: 100%; }
+  body { font-family: 'Barlow', sans-serif; background: #eaf4fc; min-height: 100vh; display: flex; justify-content: center; margin: 0; overflow-x: hidden; width: 100%; touch-action: pan-y; }
   input[type=number]::-webkit-inner-spin-button,
   input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; }
   input[type=number] { -moz-appearance: textfield; }
@@ -533,61 +534,125 @@ function TabPartidos({ userId, lockHoras }: { userId: string, lockHoras: number 
 
 function TabTabla() {
   const [jugadores, setJugadores] = useState<any[]>([]);
+  const [desglose, setDesglose] = useState<Record<string, { x3:number, x2:number, x1:number }>>({});
+  const [viewportWidth, setViewportWidth] = useState(typeof window !== "undefined" ? window.innerWidth : 600);
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2,"0");
   const fecha = `${pad(now.getDate())}/${pad(now.getMonth()+1)}/${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+
+  useEffect(() => {
+    const update = () => setViewportWidth(Math.min(window.innerWidth, 600));
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
 
   useEffect(() => {
     const q = query(collection(db, "usuarios"), orderBy("pts","desc"));
     return onSnapshot(q, snap => setJugadores(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
   }, []);
 
+  useEffect(() => {
+    const q = query(collection(db, "pronosticos"), where("calculado", "==", true));
+    return onSnapshot(q, snap => {
+      const acc: Record<string, { x3:number, x2:number, x1:number }> = {};
+      snap.docs.forEach(d => {
+        const { userId, pts } = d.data();
+        if (!userId || (pts !== 3 && pts !== 2 && pts !== 1)) return;
+        if (!acc[userId]) acc[userId] = { x3:0, x2:0, x1:0 };
+        if (pts === 3) acc[userId].x3++;
+        else if (pts === 2) acc[userId].x2++;
+        else acc[userId].x1++;
+      });
+      setDesglose(acc);
+    });
+  }, []);
+
+  const COL_NUM = 38;
+  const PADDING = 12;
+  const FIXED_COL_WIDTH = 18 + 6 + 30 + 6 + 90 + 8 + 12; // #, gaps, foto, gap, nombre, padding interno
+  const cardWidth = viewportWidth - PADDING * 2; // ancho de la card blanca
+  const scrollAreaWidth = Math.max(cardWidth - FIXED_COL_WIDTH, 100); // lo que le queda al area scrolleable
+
   return (
-    <div style={{ padding:12, background:MARFIL_LIGHT, flex:1 }}>
-      <div style={{ background:"white", borderRadius:12, border:"0.5px solid #e0ddd5", overflow:"hidden" }}>
+    <div style={{ padding:PADDING, background:MARFIL_LIGHT, flex:1, width:viewportWidth, boxSizing:"border-box", overflow:"hidden" }}>
+      <div style={{ background:"white", borderRadius:12, border:"0.5px solid #e0ddd5", overflow:"hidden", width:cardWidth }}>
         <div style={{ background:BORDO, padding:"10px 12px" }}>
           <div style={{ color:MARFIL, fontSize:12, fontWeight:600 }}>Tabla de posiciones</div>
           <div style={{ color:MARFIL_DARK, fontSize:10, marginTop:2 }}>{fecha}</div>
         </div>
-        <div style={{ display:"flex", padding:"4px 12px", background:BORDO_DARK, gap:6 }}>
-          {["#","","Jugador","Pts","+Hoy","▲▼"].map((h,i) => (
-            <span key={i} style={{ fontSize:9, color:MARFIL_DARK, fontWeight:500,
-              minWidth:i===0?20:i===1?34:i===3?36:i===4?26:i===5?24:"auto",
-              flex:i===2?1:undefined, textAlign:i>=3?"right":"left" }}>{h}</span>
-          ))}
-        </div>
+
         {jugadores.length === 0 && (
           <div style={{ padding:20, textAlign:"center", fontSize:12, color:"#aaa" }}>
             Aún no hay jugadores registrados
           </div>
         )}
-        {jugadores.map((j, idx) => {
-          const pos = idx+1;
-          const mov = j.mov || 0;
-          const movEl = mov > 0
-            ? <span style={{ color:VERDE }}>▲{mov}</span>
-            : mov < 0 ? <span style={{ color:ROJO }}>▼{Math.abs(mov)}</span>
-            : <span style={{ color:"#aaa" }}>—</span>;
-          return (
-            <div key={j.id} style={{ display:"flex", alignItems:"center",
-              padding:"8px 12px", borderBottom:"0.5px solid #eee", gap:6 }}>
-              <span style={{ fontSize:13, fontWeight:500, color:pos<=3?BORDO:"#aaa", minWidth:18 }}>{pos}</span>
-              <div style={{ width:30, height:30, borderRadius:"50%", border:`1.5px solid ${BORDO}`,
-                overflow:"hidden", background:MARFIL, flexShrink:0,
-                display:"flex", alignItems:"center", justifyContent:"center" }}>
-                {j.photoURL
-                  ? <img src={j.photoURL} alt={j.nick} style={{ width:"100%", height:"100%", objectFit:"cover" }} />
-                  : <span style={{ fontSize:11, fontWeight:500, color:BORDO }}>{(j.ini||"?").slice(0,2)}</span>
-                }
+
+        {jugadores.length > 0 && (
+          <div style={{ display:"flex", width:cardWidth, overflow:"hidden" }}>
+            {/* Columnas fijas: #, foto, jugador */}
+            <div style={{ flexShrink:0, width:FIXED_COL_WIDTH, background:"white",
+              boxShadow:"2px 0 4px rgba(0,0,0,0.06)", zIndex:2 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:6, padding:"4px 8px 4px 12px",
+                background:BORDO_DARK, height:24 }}>
+                <span style={{ fontSize:9, color:MARFIL_DARK, fontWeight:500, minWidth:18 }}>#</span>
+                <span style={{ width:30 }} />
+                <span style={{ fontSize:9, color:MARFIL_DARK, fontWeight:500, minWidth:90 }}>Jugador</span>
               </div>
-              <span style={{ flex:1, fontSize:13, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", paddingRight:4, color:"#111" }}>{j.nick||"Usuario"}</span>
-              <span style={{ fontSize:14, fontWeight:600, color:MARFIL, background:BORDO,
-                padding:"2px 7px", borderRadius:3, minWidth:30, textAlign:"center" }}>{j.pts||0}</span>
-              <span style={{ fontSize:11, color:VERDE, minWidth:28, textAlign:"right" }}>+{j.hoy||0}</span>
-              <span style={{ fontSize:10, fontWeight:500, minWidth:22, textAlign:"right" }}>{movEl}</span>
+              {jugadores.map((j, idx) => {
+                const pos = idx+1;
+                return (
+                  <div key={j.id} style={{ display:"flex", alignItems:"center", gap:6,
+                    padding:"8px 8px 8px 12px", borderBottom:"0.5px solid #eee", height:46, boxSizing:"border-box" }}>
+                    <span style={{ fontSize:13, fontWeight:500, color:pos<=3?BORDO:"#aaa", minWidth:18 }}>{pos}</span>
+                    <div style={{ width:30, height:30, borderRadius:"50%", border:`1.5px solid ${BORDO}`,
+                      overflow:"hidden", background:MARFIL, flexShrink:0,
+                      display:"flex", alignItems:"center", justifyContent:"center" }}>
+                      {j.photoURL
+                        ? <img src={j.photoURL} alt={j.nick} style={{ width:"100%", height:"100%", objectFit:"cover" }} />
+                        : <span style={{ fontSize:11, fontWeight:500, color:BORDO }}>{(j.ini||"?").slice(0,2)}</span>
+                      }
+                    </div>
+                    <span style={{ minWidth:90, fontSize:13, overflow:"hidden", textOverflow:"ellipsis",
+                      whiteSpace:"nowrap", color:"#111" }}>{j.nick||"Usuario"}</span>
+                  </div>
+                );
+              })}
             </div>
-          );
-        })}
+
+            {/* Columnas con scroll horizontal: Pts, x3, x2, x1, +Hoy, mov */}
+            <div style={{ overflowX:"auto", width:scrollAreaWidth, touchAction:"pan-x", WebkitOverflowScrolling:"touch" }}>
+              <div style={{ display:"flex", gap:6, padding:"4px 12px", background:BORDO_DARK, height:24,
+                boxSizing:"border-box", alignItems:"center", width:"max-content" }}>
+                {["Pts","x3","x2","x1","+Hoy","▲▼"].map((h,i) => (
+                  <span key={i} style={{ fontSize:9, color:MARFIL_DARK, fontWeight:500,
+                    minWidth:i===0?36:i===4?32:i===5?28:COL_NUM, textAlign:"right" }}>{h}</span>
+                ))}
+              </div>
+              {jugadores.map(j => {
+                const d = desglose[j.id] || { x3:0, x2:0, x1:0 };
+                const mov = j.mov || 0;
+                const movEl = mov > 0
+                  ? <span style={{ color:VERDE }}>▲{mov}</span>
+                  : mov < 0 ? <span style={{ color:ROJO }}>▼{Math.abs(mov)}</span>
+                  : <span style={{ color:"#aaa" }}>—</span>;
+                return (
+                  <div key={j.id} style={{ display:"flex", gap:6, alignItems:"center",
+                    padding:"8px 12px", borderBottom:"0.5px solid #eee", height:46, boxSizing:"border-box",
+                    width:"max-content" }}>
+                    <span style={{ fontSize:14, fontWeight:600, color:MARFIL, background:BORDO,
+                      padding:"2px 7px", borderRadius:3, minWidth:36, textAlign:"center" }}>{j.pts||0}</span>
+                    <span style={{ fontSize:13, fontWeight:500, color:BORDO, minWidth:COL_NUM, textAlign:"right" }}>{d.x3}</span>
+                    <span style={{ fontSize:13, fontWeight:500, color:"#555", minWidth:COL_NUM, textAlign:"right" }}>{d.x2}</span>
+                    <span style={{ fontSize:13, fontWeight:500, color:"#999", minWidth:COL_NUM, textAlign:"right" }}>{d.x1}</span>
+                    <span style={{ fontSize:11, color:VERDE, minWidth:32, textAlign:"right" }}>+{j.hoy||0}</span>
+                    <span style={{ fontSize:10, fontWeight:500, minWidth:28, textAlign:"right" }}>{movEl}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2120,7 +2185,7 @@ export default function App() {
     <>
       <style>{css}</style>
       <div style={{ width:"100%", maxWidth:600, background:"white", height:"100vh",
-        display:"flex", flexDirection:"column" }}>
+        display:"flex", flexDirection:"column", overflowX:"hidden" }}>
         <div style={{ background:BORDO, padding:"10px 20px 6px",
           display:"flex", justifyContent:"space-between", flexShrink:0 }}>
           <span style={{ color:MARFIL, fontSize:11, fontWeight:500 }}>{horaArt}</span>
@@ -2146,7 +2211,7 @@ export default function App() {
           </div>
         </div>
 
-        <div style={{ flex:1, overflowY:"auto", display:"flex", flexDirection:"column" }}>
+        <div style={{ flex:1, overflowY:"auto", overflowX:"hidden", display:"flex", flexDirection:"column" }}>
           {authLoading
             ? <div style={{ padding:40, textAlign:"center", color:"#aaa", background:MARFIL_LIGHT }}>Cargando...</div>
             : !user
