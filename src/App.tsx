@@ -535,9 +535,17 @@ function TabPartidos({ userId, lockHoras }: { userId: string, lockHoras: number 
 function TabTabla() {
   const [jugadores, setJugadores] = useState<any[]>([]);
   const [desglose, setDesglose] = useState<Record<string, { x3:number, x2:number, x1:number }>>({});
+  const [viewportWidth, setViewportWidth] = useState(typeof window !== "undefined" ? window.innerWidth : 600);
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2,"0");
   const fecha = `${pad(now.getDate())}/${pad(now.getMonth()+1)}/${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+
+  useEffect(() => {
+    const update = () => setViewportWidth(Math.min(window.innerWidth, 600));
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
 
   useEffect(() => {
     const q = query(collection(db, "usuarios"), orderBy("pts","desc"));
@@ -561,10 +569,14 @@ function TabTabla() {
   }, []);
 
   const COL_NUM = 38;
+  const PADDING = 12;
+  const FIXED_COL_WIDTH = 18 + 6 + 30 + 6 + 90 + 8 + 12; // #, gaps, foto, gap, nombre, padding interno
+  const cardWidth = viewportWidth - PADDING * 2; // ancho de la card blanca
+  const scrollAreaWidth = Math.max(cardWidth - FIXED_COL_WIDTH, 100); // lo que le queda al area scrolleable
 
   return (
-    <div style={{ padding:12, background:MARFIL_LIGHT, flex:1, overflowX:"hidden", maxWidth:"100%", boxSizing:"border-box" }}>
-      <div style={{ background:"white", borderRadius:12, border:"0.5px solid #e0ddd5", overflow:"hidden", maxWidth:"100%" }}>
+    <div style={{ padding:PADDING, background:MARFIL_LIGHT, flex:1, width:viewportWidth, boxSizing:"border-box", overflow:"hidden" }}>
+      <div style={{ background:"white", borderRadius:12, border:"0.5px solid #e0ddd5", overflow:"hidden", width:cardWidth }}>
         <div style={{ background:BORDO, padding:"10px 12px" }}>
           <div style={{ color:MARFIL, fontSize:12, fontWeight:600 }}>Tabla de posiciones</div>
           <div style={{ color:MARFIL_DARK, fontSize:10, marginTop:2 }}>{fecha}</div>
@@ -577,10 +589,10 @@ function TabTabla() {
         )}
 
         {jugadores.length > 0 && (
-          <div style={{ display:"flex", maxWidth:"100%", overflow:"hidden" }}>
+          <div style={{ display:"flex", width:cardWidth, overflow:"hidden" }}>
             {/* Columnas fijas: #, foto, jugador */}
-            <div style={{ flexShrink:0, position:"sticky", left:0, zIndex:2, background:"white",
-              boxShadow:"2px 0 4px rgba(0,0,0,0.06)" }}>
+            <div style={{ flexShrink:0, width:FIXED_COL_WIDTH, background:"white",
+              boxShadow:"2px 0 4px rgba(0,0,0,0.06)", zIndex:2 }}>
               <div style={{ display:"flex", alignItems:"center", gap:6, padding:"4px 8px 4px 12px",
                 background:BORDO_DARK, height:24 }}>
                 <span style={{ fontSize:9, color:MARFIL_DARK, fontWeight:500, minWidth:18 }}>#</span>
@@ -609,9 +621,9 @@ function TabTabla() {
             </div>
 
             {/* Columnas con scroll horizontal: Pts, x3, x2, x1, +Hoy, mov */}
-            <div style={{ overflowX:"auto", flex:1, minWidth:0, touchAction:"pan-x", WebkitOverflowScrolling:"touch" }}>
+            <div style={{ overflowX:"auto", width:scrollAreaWidth, touchAction:"pan-x", WebkitOverflowScrolling:"touch" }}>
               <div style={{ display:"flex", gap:6, padding:"4px 12px", background:BORDO_DARK, height:24,
-                boxSizing:"border-box", alignItems:"center", width:"fit-content" }}>
+                boxSizing:"border-box", alignItems:"center", width:"max-content" }}>
                 {["Pts","x3","x2","x1","+Hoy","▲▼"].map((h,i) => (
                   <span key={i} style={{ fontSize:9, color:MARFIL_DARK, fontWeight:500,
                     minWidth:i===0?36:i===4?32:i===5?28:COL_NUM, textAlign:"right" }}>{h}</span>
@@ -627,7 +639,7 @@ function TabTabla() {
                 return (
                   <div key={j.id} style={{ display:"flex", gap:6, alignItems:"center",
                     padding:"8px 12px", borderBottom:"0.5px solid #eee", height:46, boxSizing:"border-box",
-                    width:"fit-content" }}>
+                    width:"max-content" }}>
                     <span style={{ fontSize:14, fontWeight:600, color:MARFIL, background:BORDO,
                       padding:"2px 7px", borderRadius:3, minWidth:36, textAlign:"center" }}>{j.pts||0}</span>
                     <span style={{ fontSize:13, fontWeight:500, color:BORDO, minWidth:COL_NUM, textAlign:"right" }}>{d.x3}</span>
