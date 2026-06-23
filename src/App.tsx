@@ -92,7 +92,8 @@ const JUGADORES_BASE: Record<string, string[]> = {
 const css = `
   @import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&display=swap');
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: 'Barlow', sans-serif; background: #eaf4fc; min-height: 100vh; display: flex; justify-content: center; margin: 0; }
+  html { overflow-x: hidden; width: 100%; }
+  body { font-family: 'Barlow', sans-serif; background: #eaf4fc; min-height: 100vh; display: flex; justify-content: center; margin: 0; overflow-x: hidden; width: 100%; touch-action: pan-y; }
   input[type=number]::-webkit-inner-spin-button,
   input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; }
   input[type=number] { -moz-appearance: textfield; }
