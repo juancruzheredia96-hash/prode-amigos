@@ -576,7 +576,7 @@ function TabTabla() {
         )}
 
         {jugadores.length > 0 && (
-          <div style={{ display:"flex", maxWidth:"100%" }}>
+          <div style={{ display:"flex", maxWidth:"100%", overflow:"hidden" }}>
             {/* Columnas fijas: #, foto, jugador */}
             <div style={{ flexShrink:0, position:"sticky", left:0, zIndex:2, background:"white",
               boxShadow:"2px 0 4px rgba(0,0,0,0.06)" }}>
@@ -608,7 +608,7 @@ function TabTabla() {
             </div>
 
             {/* Columnas con scroll horizontal: Pts, x3, x2, x1, +Hoy, mov */}
-            <div style={{ overflowX:"auto", flex:1, minWidth:0 }}>
+            <div style={{ overflowX:"auto", flex:1, minWidth:0, touchAction:"pan-x", WebkitOverflowScrolling:"touch" }}>
               <div style={{ display:"flex", gap:6, padding:"4px 12px", background:BORDO_DARK, height:24,
                 boxSizing:"border-box", alignItems:"center", width:"fit-content" }}>
                 {["Pts","x3","x2","x1","+Hoy","▲▼"].map((h,i) => (
