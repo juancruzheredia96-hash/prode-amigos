@@ -562,8 +562,8 @@ function TabTabla() {
   const COL_NUM = 38;
 
   return (
-    <div style={{ padding:12, background:MARFIL_LIGHT, flex:1 }}>
-      <div style={{ background:"white", borderRadius:12, border:"0.5px solid #e0ddd5", overflow:"hidden" }}>
+    <div style={{ padding:12, background:MARFIL_LIGHT, flex:1, overflowX:"hidden", maxWidth:"100%", boxSizing:"border-box" }}>
+      <div style={{ background:"white", borderRadius:12, border:"0.5px solid #e0ddd5", overflow:"hidden", maxWidth:"100%" }}>
         <div style={{ background:BORDO, padding:"10px 12px" }}>
           <div style={{ color:MARFIL, fontSize:12, fontWeight:600 }}>Tabla de posiciones</div>
           <div style={{ color:MARFIL_DARK, fontSize:10, marginTop:2 }}>{fecha}</div>
@@ -576,7 +576,7 @@ function TabTabla() {
         )}
 
         {jugadores.length > 0 && (
-          <div style={{ display:"flex" }}>
+          <div style={{ display:"flex", maxWidth:"100%" }}>
             {/* Columnas fijas: #, foto, jugador */}
             <div style={{ flexShrink:0, position:"sticky", left:0, zIndex:2, background:"white",
               boxShadow:"2px 0 4px rgba(0,0,0,0.06)" }}>
@@ -608,9 +608,9 @@ function TabTabla() {
             </div>
 
             {/* Columnas con scroll horizontal: Pts, x3, x2, x1, +Hoy, mov */}
-            <div style={{ overflowX:"auto", flex:1 }}>
+            <div style={{ overflowX:"auto", flex:1, minWidth:0 }}>
               <div style={{ display:"flex", gap:6, padding:"4px 12px", background:BORDO_DARK, height:24,
-                boxSizing:"border-box", alignItems:"center", minWidth:"fit-content" }}>
+                boxSizing:"border-box", alignItems:"center", width:"fit-content" }}>
                 {["Pts","x3","x2","x1","+Hoy","▲▼"].map((h,i) => (
                   <span key={i} style={{ fontSize:9, color:MARFIL_DARK, fontWeight:500,
                     minWidth:i===0?36:i===4?32:i===5?28:COL_NUM, textAlign:"right" }}>{h}</span>
@@ -626,7 +626,7 @@ function TabTabla() {
                 return (
                   <div key={j.id} style={{ display:"flex", gap:6, alignItems:"center",
                     padding:"8px 12px", borderBottom:"0.5px solid #eee", height:46, boxSizing:"border-box",
-                    minWidth:"fit-content" }}>
+                    width:"fit-content" }}>
                     <span style={{ fontSize:14, fontWeight:600, color:MARFIL, background:BORDO,
                       padding:"2px 7px", borderRadius:3, minWidth:36, textAlign:"center" }}>{j.pts||0}</span>
                     <span style={{ fontSize:13, fontWeight:500, color:BORDO, minWidth:COL_NUM, textAlign:"right" }}>{d.x3}</span>
@@ -2172,7 +2172,7 @@ export default function App() {
     <>
       <style>{css}</style>
       <div style={{ width:"100%", maxWidth:600, background:"white", height:"100vh",
-        display:"flex", flexDirection:"column" }}>
+        display:"flex", flexDirection:"column", overflowX:"hidden" }}>
         <div style={{ background:BORDO, padding:"10px 20px 6px",
           display:"flex", justifyContent:"space-between", flexShrink:0 }}>
           <span style={{ color:MARFIL, fontSize:11, fontWeight:500 }}>{horaArt}</span>
@@ -2198,7 +2198,7 @@ export default function App() {
           </div>
         </div>
 
-        <div style={{ flex:1, overflowY:"auto", display:"flex", flexDirection:"column" }}>
+        <div style={{ flex:1, overflowY:"auto", overflowX:"hidden", display:"flex", flexDirection:"column" }}>
           {authLoading
             ? <div style={{ padding:40, textAlign:"center", color:"#aaa", background:MARFIL_LIGHT }}>Cargando...</div>
             : !user
