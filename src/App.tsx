@@ -310,10 +310,10 @@ function LoginScreen() {
     <div style={{ display:"flex", flexDirection:"column", alignItems:"center",
       justifyContent:"center", minHeight:"80vh", padding:32,
       background:MARFIL_LIGHT, gap:24 }}>
-      <img src="https://i.imgur.com/0e3BR0T.png" alt="ECFC" style={{ width:90, height:90, objectFit:"contain" }} />
+      <div style={{ fontSize:56 }}>⚽</div>
       <div style={{ textAlign:"center" }}>
-        <div style={{ fontSize:22, fontWeight:700, color:BORDO }}>Elefante y Castillo FC</div>
-        <div style={{ fontSize:14, color:BORDO_LIGHT, marginTop:4 }}>Prode Mundial 2026</div>
+        <div style={{ fontSize:22, fontWeight:700, color:BORDO }}>El PRODE</div>
+        
       </div>
       <button onClick={handleLogin} disabled={loading} style={{
         background:BORDO, color:MARFIL, border:"none", borderRadius:8,
