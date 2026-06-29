@@ -109,6 +109,36 @@ function horaART() {
   });
 }
 
+// Redimensiona una imagen a un cuadrado de `tamano`px, recortando el centro,
+// y la devuelve como Base64 JPEG comprimido. Pensado para fotos de perfil chicas
+// que entren cómodas en un documento de Firestore (limite 1MB).
+function comprimirImagenAFoto(file: File, tamano = 200, calidad = 0.7): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("No se pudo leer el archivo"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("No se pudo procesar la imagen"));
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = tamano;
+        canvas.height = tamano;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) { reject(new Error("Canvas no disponible")); return; }
+
+        const lado = Math.min(img.width, img.height);
+        const sx = (img.width - lado) / 2;
+        const sy = (img.height - lado) / 2;
+        ctx.drawImage(img, sx, sy, lado, lado, 0, 0, tamano, tamano);
+
+        resolve(canvas.toDataURL("image/jpeg", calidad));
+      };
+      img.src = reader.result as string;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 function estaBloquado(fecha: string, hora: string, horasAntes: number): boolean {
   if (!fecha || !hora) return false;
   const [h, m] = hora.split(":").map(Number);
@@ -203,53 +233,65 @@ async function calcularPuntosPredicciones(resultados: Record<string,string>) {
 }
 
 
-async function revertirPuntosPartido(matchId: string) {
-  const pronosSnap = await getDocs(collection(db, "pronosticos"));
-  const delPartido = pronosSnap.docs.filter(d => d.data().matchId === matchId && d.data().calculado === true);
-  for (const pDoc of delPartido) {
-    const { userId, pts } = pDoc.data();
-    if (!pts) continue;
-    const userRef = doc(db, "usuarios", userId);
-    const userSnap = await getDoc(userRef);
-    if (!userSnap.exists()) continue;
-    const ud = userSnap.data();
-    const esExacto = pts === 3;
-    await setDoc(userRef, {
-      pts: Math.max(0, (ud.pts || 0) - pts),
-      hoy: Math.max(0, (ud.hoy || 0) - pts),
-      exactos: esExacto ? Math.max(0, (ud.exactos || 0) - 1) : (ud.exactos || 0),
-    }, { merge: true });
-    await setDoc(pDoc.ref, { pts: null, calculado: false }, { merge: true });
-  }
-}
-
 async function calcularPuntosPartido(matchId: string, gL: number, gV: number) {
   const pronosSnap = await getDocs(collection(db, "pronosticos"));
   const delPartido = pronosSnap.docs.filter(d => d.data().matchId === matchId);
+  const pronosticoPorUsuario: Record<string, any> = {};
   for (const pDoc of delPartido) {
-    const { userId, mL, mV } = pDoc.data();
-    if (mL === null || mV === null) continue;
-    const pts = calcPtsNuevo(gL, gV, mL, mV) ?? 0;
-    const userRef = doc(db, "usuarios", userId);
-    const userSnap = await getDoc(userRef);
-    if (!userSnap.exists()) continue;
-    const ud = userSnap.data();
+    const data = pDoc.data();
+    pronosticoPorUsuario[data.userId] = { ref: pDoc.ref, ...data };
+  }
+
+  // Este partido cuenta para el denominador de TODOS los usuarios registrados,
+  // hayan pronosticado o no (si no pronosticaron, no suman al numerador de ninguna metrica).
+  const usuariosSnap = await getDocs(collection(db, "usuarios"));
+
+  for (const userDoc of usuariosSnap.docs) {
+    const userId = userDoc.id;
+    const ud = userDoc.data();
+    const pronostico = pronosticoPorUsuario[userId];
+    const mL = pronostico?.mL ?? null;
+    const mV = pronostico?.mV ?? null;
+    const tienePronostico = mL !== null && mV !== null;
+
+    const pts = tienePronostico ? (calcPtsNuevo(gL, gV, mL, mV) ?? 0) : 0;
     const esExacto = pts === 3;
     const rachaActual = esExacto ? (ud.rachaActual || 0) + 1 : 0;
     const rachaMasLarga = Math.max(ud.rachaMasLarga || 0, rachaActual);
-    await setDoc(userRef, {
+    const ceroRacha = pts === 0 ? (ud.ceroRacha || 0) + 1 : ud.ceroRacha || 0;
+
+    // Acierto de goles: de los 2 marcadores pronosticados (local y visitante), cuantos coincidieron exacto
+    const golesAciertaL = tienePronostico && mL === gL ? 1 : 0;
+    const golesAciertaV = tienePronostico && mV === gV ? 1 : 0;
+    const golesAcertados = (ud.golesAcertados || 0) + golesAciertaL + golesAciertaV;
+    const golesPronosticados = (ud.golesPronosticados || 0) + 2;
+    const acierto = golesPronosticados > 0 ? Math.round((golesAcertados / golesPronosticados) * 100) : 0;
+
+    // % resultados exactos y % acierto resultado: sobre el TOTAL de partidos con resultado (haya pronosticado o no)
+    const partidosConResultado = (ud.partidosConResultado || 0) + 1;
+    const exactos = esExacto ? (ud.exactos || 0) + 1 : (ud.exactos || 0);
+    const aciertosResultado = (tienePronostico && pts >= 1) ? (ud.aciertosResultado || 0) + 1 : (ud.aciertosResultado || 0);
+    const pctExactos = Math.round((exactos / partidosConResultado) * 100);
+    const pctAciertoResultado = Math.round((aciertosResultado / partidosConResultado) * 100);
+
+    await setDoc(userDoc.ref, {
       pts: (ud.pts || 0) + pts,
       hoy: (ud.hoy || 0) + pts,
-      exactos: esExacto ? (ud.exactos || 0) + 1 : (ud.exactos || 0),
-      rachaActual, rachaMasLarga,
+      exactos, rachaActual, rachaMasLarga, ceroRacha,
+      golesAcertados, golesPronosticados, acierto,
+      partidosConResultado, aciertosResultado, pctExactos, pctAciertoResultado,
     }, { merge: true });
-    await setDoc(pDoc.ref, { pts, calculado: true }, { merge: true });
+
+    if (pronostico) {
+      await setDoc(pronostico.ref, { pts, calculado: true }, { merge: true });
+    }
   }
-  const usuariosSnap = await getDocs(query(collection(db, "usuarios"), orderBy("pts", "desc")));
-  await Promise.all(usuariosSnap.docs.map((d, idx) =>
+
+  const usuariosOrdenSnap = await getDocs(query(collection(db, "usuarios"), orderBy("pts", "desc")));
+  await Promise.all(usuariosOrdenSnap.docs.map((d, idx) =>
     setDoc(d.ref, { pos: idx + 1, mov: (d.data().posAnterior || idx + 1) - (idx + 1) }, { merge: true })
   ));
-  await Promise.all(usuariosSnap.docs.map((d, idx) =>
+  await Promise.all(usuariosOrdenSnap.docs.map((d, idx) =>
     setDoc(d.ref, { posAnterior: idx + 1 }, { merge: true })
   ));
 }
@@ -532,10 +574,11 @@ function TabPartidos({ userId, lockHoras }: { userId: string, lockHoras: number 
 }
 
 
-function TabTabla() {
+function TabTabla({ onSelectUser }: { onSelectUser: (uid: string) => void }) {
   const [jugadores, setJugadores] = useState<any[]>([]);
-  const [desglose, setDesglose] = useState<Record<string, { x3:number, x2:number, x1:number }>>({});
+  const [desglose, setDesglose] = useState<Record<string, { x3:number, x2:number, x1:number, x0:number }>>({});
   const [viewportWidth, setViewportWidth] = useState(typeof window !== "undefined" ? window.innerWidth : 600);
+  const [fechaCorte, setFechaCorte] = useState<string|null>(null);
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2,"0");
   const fecha = `${pad(now.getDate())}/${pad(now.getMonth()+1)}/${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
@@ -552,21 +595,42 @@ function TabTabla() {
     return onSnapshot(q, snap => setJugadores(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
   }, []);
 
+  // El primer partido real del torneo (Mexico vs Sudafrica) marca el corte: cualquier
+  // pronostico de un partido con fecha anterior a esta es de pruebas iniciales y se descarta.
+  // Cargamos TODAS las fechas de partidos de una sola vez (no por-matchId) para minimizar lecturas.
+  const [fechaPorMatch, setFechaPorMatch] = useState<Record<string,string>>({});
+  const [partidosCargados, setPartidosCargados] = useState(false);
+
   useEffect(() => {
+    getDocs(collection(db, "partidos")).then(snap => {
+      const mapa: Record<string,string> = {};
+      snap.docs.forEach(d => { mapa[d.id] = d.data().fecha || ""; });
+      setFechaPorMatch(mapa);
+      setPartidosCargados(true);
+      if (mapa["mgpUr5zbxrVJZHGBEN97"]) setFechaCorte(mapa["mgpUr5zbxrVJZHGBEN97"]);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!partidosCargados) return; // espera a tener el mapa completo antes de calcular el desglose
     const q = query(collection(db, "pronosticos"), where("calculado", "==", true));
     return onSnapshot(q, snap => {
-      const acc: Record<string, { x3:number, x2:number, x1:number }> = {};
+      const acc: Record<string, { x3:number, x2:number, x1:number, x0:number }> = {};
       snap.docs.forEach(d => {
-        const { userId, pts } = d.data();
-        if (!userId || (pts !== 3 && pts !== 2 && pts !== 1)) return;
-        if (!acc[userId]) acc[userId] = { x3:0, x2:0, x1:0 };
+        const { userId, pts, matchId } = d.data();
+        if (!userId || (pts !== 3 && pts !== 2 && pts !== 1 && pts !== 0)) return;
+        // Si el partido fue borrado de la base (simulaciones iniciales eliminadas), descartar igual
+        if (matchId && !(matchId in fechaPorMatch)) return;
+        if (fechaCorte && matchId && fechaPorMatch[matchId] && fechaPorMatch[matchId] < fechaCorte) return; // descarta pruebas iniciales
+        if (!acc[userId]) acc[userId] = { x3:0, x2:0, x1:0, x0:0 };
         if (pts === 3) acc[userId].x3++;
         else if (pts === 2) acc[userId].x2++;
-        else acc[userId].x1++;
+        else if (pts === 1) acc[userId].x1++;
+        else acc[userId].x0++;
       });
       setDesglose(acc);
     });
-  }, []);
+  }, [fechaCorte, fechaPorMatch, partidosCargados]);
 
   const COL_NUM = 38;
   const PADDING = 12;
@@ -601,17 +665,22 @@ function TabTabla() {
               </div>
               {jugadores.map((j, idx) => {
                 const pos = idx+1;
+                const tipo = tipoRacha(j);
                 return (
-                  <div key={j.id} style={{ display:"flex", alignItems:"center", gap:6,
-                    padding:"8px 8px 8px 12px", borderBottom:"0.5px solid #eee", height:46, boxSizing:"border-box" }}>
+                  <div key={j.id} onClick={() => onSelectUser(j.id)} style={{ display:"flex", alignItems:"center", gap:6,
+                    padding:"8px 8px 8px 12px", borderBottom:"0.5px solid #eee", height:46, boxSizing:"border-box",
+                    cursor:"pointer" }}>
                     <span style={{ fontSize:13, fontWeight:500, color:pos<=3?BORDO:"#aaa", minWidth:18 }}>{pos}</span>
-                    <div style={{ width:30, height:30, borderRadius:"50%", border:`1.5px solid ${BORDO}`,
-                      overflow:"hidden", background:MARFIL, flexShrink:0,
-                      display:"flex", alignItems:"center", justifyContent:"center" }}>
-                      {j.photoURL
-                        ? <img src={j.photoURL} alt={j.nick} style={{ width:"100%", height:"100%", objectFit:"cover" }} />
-                        : <span style={{ fontSize:11, fontWeight:500, color:BORDO }}>{(j.ini||"?").slice(0,2)}</span>
-                      }
+                    <div style={{ position:"relative", width:30, height:30, flexShrink:0 }}>
+                      <div style={{ width:30, height:30, borderRadius:"50%", border:`1.5px solid ${BORDO}`,
+                        overflow:"hidden", background:MARFIL, position:"relative", zIndex:1,
+                        display:"flex", alignItems:"center", justifyContent:"center" }}>
+                        {(j.fotoPersonalizada || j.photoURL)
+                          ? <img src={j.fotoPersonalizada || j.photoURL} alt={j.nick} style={{ width:"100%", height:"100%", objectFit:"cover" }} />
+                          : <span style={{ fontSize:11, fontWeight:500, color:BORDO }}>{(j.ini||"?").slice(0,2)}</span>
+                        }
+                      </div>
+                      <RachaOverlay tipo={tipo} size={30} />
                     </div>
                     <span style={{ minWidth:90, fontSize:13, overflow:"hidden", textOverflow:"ellipsis",
                       whiteSpace:"nowrap", color:"#111" }}>{j.nick||"Usuario"}</span>
@@ -630,16 +699,16 @@ function TabTabla() {
                 ))}
               </div>
               {jugadores.map(j => {
-                const d = desglose[j.id] || { x3:0, x2:0, x1:0 };
+                const d = desglose[j.id] || { x3:0, x2:0, x1:0, x0:0 };
                 const mov = j.mov || 0;
                 const movEl = mov > 0
                   ? <span style={{ color:VERDE }}>▲{mov}</span>
                   : mov < 0 ? <span style={{ color:ROJO }}>▼{Math.abs(mov)}</span>
                   : <span style={{ color:"#aaa" }}>—</span>;
                 return (
-                  <div key={j.id} style={{ display:"flex", gap:6, alignItems:"center",
+                  <div key={j.id} onClick={() => onSelectUser(j.id)} style={{ display:"flex", gap:6, alignItems:"center",
                     padding:"8px 12px", borderBottom:"0.5px solid #eee", height:46, boxSizing:"border-box",
-                    width:"max-content" }}>
+                    width:"max-content", cursor:"pointer" }}>
                     <span style={{ fontSize:14, fontWeight:600, color:MARFIL, background:BORDO,
                       padding:"2px 7px", borderRadius:3, minWidth:36, textAlign:"center" }}>{j.pts||0}</span>
                     <span style={{ fontSize:13, fontWeight:500, color:BORDO, minWidth:COL_NUM, textAlign:"right" }}>{d.x3}</span>
@@ -873,7 +942,10 @@ function TabTendencias() {
     const q = query(collection(db, "partidos"), orderBy("fecha"), orderBy("hora"));
     return onSnapshot(q, snap => {
       const data = snap.docs.map(d => ({ id:d.id, ...d.data() })) as any[];
-      const sinResultado = data.filter((p:any) => p.localN !== "Por definir" && p.visitaN !== "Por definir");
+      const sinResultado = data.filter((p:any) =>
+        p.localN !== "Por definir" && p.visitaN !== "Por definir" &&
+        (p.gL === null || p.gL === undefined)
+      );
       setPartidos(sinResultado);
       if (sinResultado.length > 0 && !selectedId) setSelectedId(sinResultado[0].id);
     });
@@ -938,10 +1010,26 @@ function TabTendencias() {
     setLoadingStats(false);
   }
 
-  function acuerdoConfig(pct: number) {
-    if (pct >= 80) return { label:"Consenso", sub:"El grupo lo tiene clarísimo", icon:"✅", bg:"#e8f5e9", color:"#2e7d32" };
-    if (pct >= 40) return { label:"Peleado", sub:"Hay para todos los gustos 🤷", icon:"🤔", bg:"#fff8e1", color:"#f57f17" };
-    return { label:"¡Picante!", sub:"Cada uno en su propio mundo", icon:"🌶️", bg:"#fce4ec", color:"#c62828" };
+  function acuerdoConfig(votos: {local:number, empate:number, visita:number}) {
+    const total = votos.local + votos.empate + votos.visita;
+    if (total === 0) return { label:"¡Picante!", sub:"Cada uno en su propio mundo", icon:"🌶️", bg:"#fce4ec", color:"#c62828" };
+
+    const valores = [votos.local, votos.empate, votos.visita].sort((a,b) => b-a);
+    const pctMax = Math.round(valores[0]/total*100);
+    const pct2do = Math.round(valores[1]/total*100);
+    const pctTopDos = pctMax + pct2do;
+    const diffTopDos = pctMax - pct2do;
+
+    // Consenso claro: una sola opción domina con 80%+
+    if (pctMax >= 80) return { label:"Consenso", sub:"El grupo lo tiene clarísimo", icon:"✅", bg:"#e8f5e9", color:"#2e7d32" };
+
+    // Picante: nadie supera 35% solo (dispersión total), O dos opciones parejas (diff<=10pp) suman 80%+ (dos bandos reales)
+    const dosBandos = diffTopDos <= 10 && pctTopDos >= 80;
+    if (pctMax < 35 || dosBandos) {
+      return { label:"¡Picante!", sub:"Cada uno en su propio mundo", icon:"🌶️", bg:"#fce4ec", color:"#c62828" };
+    }
+
+    return { label:"Peleado", sub:"Hay para todos los gustos 🤷", icon:"🤔", bg:"#fff8e1", color:"#f57f17" };
   }
 
   function Donut({ vL, vE, vV }: { vL:number, vE:number, vV:number }) {
@@ -977,7 +1065,7 @@ function TabTendencias() {
       <svg viewBox="0 0 100 100" width={86} height={86}>
         {s1 && <path d={s1} fill={BORDO}/>}
         {s2 && <path d={s2} fill={MARFIL_DARK}/>}
-        {s3 && <path d={s3} fill="#2d7bb8" stroke="#ddd" strokeWidth="0.5"/>}
+        {s3 && <path d={s3} fill={MARFIL} stroke="#ddd" strokeWidth="0.5"/>}
         <circle cx={cx} cy={cy} r={22} fill="white"/>
         <text x={cx} y={cy-4} textAnchor="middle" fontSize={8} fill="#888">{maxSub}</text>
         <text x={cx} y={cy+8} textAnchor="middle" fontSize={12} fontWeight="bold" fill={BORDO}>
@@ -1012,7 +1100,7 @@ return (
       )}
 
       {!loadingStats && stats && (() => {
-        const ac = acuerdoConfig(stats.pctAcuerdo);
+        const ac = acuerdoConfig(stats.votos);
         const maxBar = Math.max(stats.promedioL, stats.promedioV, 2);
         return (
           <>
@@ -1041,12 +1129,12 @@ return (
                   {[
                     { label:`${stats.partido?.localN}`, color:BORDO, votos:stats.votos.local },
                     { label:"Empate", color:MARFIL_DARK, votos:stats.votos.empate },
-                    { label:`${stats.partido?.visitaN}`, color:"#2d7bb8", votos:stats.votos.visita },
+                    { label:`${stats.partido?.visitaN}`, color:"#ccc", votos:stats.votos.visita },
                   ].map(row => (
                     <div key={row.label} style={{ display:"flex", alignItems:"center",
                       gap:7, marginBottom:8 }}>
                       <div style={{ width:10, height:10, borderRadius:"50%",
-                        background:row.color, border:"none",
+                        background:row.color, border: row.color==="#ccc"?"1px solid #bbb":"none",
                         flexShrink:0 }}/>
                       <div style={{ fontSize:11, color:"#555", flex:1 }}>{row.label}</div>
                       <div style={{ fontSize:13, fontWeight:700, color:BORDO }}>
@@ -1498,84 +1586,36 @@ function FormResultado({ partidos, onClose }: { partidos:any[], onClose:()=>void
   const [gV, setGV] = useState("");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
-  const [confirmCorregir, setConfirmCorregir] = useState(false);
-
-  const partidoSeleccionado = partidos.find(p => p.id === matchId);
-  const yaTieneResultado = partidoSeleccionado && partidoSeleccionado.gL !== undefined && partidoSeleccionado.gL !== null;
-
-  function elegirPartido(id: string) {
-    setMatchId(id);
-    setConfirmCorregir(false);
-    const p = partidos.find(x => x.id === id);
-    if (p && p.gL !== undefined && p.gL !== null) {
-      setGL(String(p.gL));
-      setGV(String(p.gV));
-    } else {
-      setGL(""); setGV("");
-    }
-  }
+  const sinResultado = partidos.filter(p => p.gL===undefined||p.gL===null);
 
   async function guardar() {
     if (!matchId||gL===""||gV==="") return;
-    if (yaTieneResultado && !confirmCorregir) return;
     setSaving(true);
     const gLNum=parseInt(gL), gVNum=parseInt(gV);
-    if (yaTieneResultado) {
-      setMsg("Revirtiendo puntos anteriores...");
-      await revertirPuntosPartido(matchId);
-    }
     await setDoc(doc(db,"partidos",matchId), { gL:gLNum, gV:gVNum }, { merge:true });
-    setMsg("Calculando puntos...");
     await calcularPuntosPartido(matchId, gLNum, gVNum);
-    setMsg(yaTieneResultado ? "✓ Resultado corregido y puntos recalculados" : "✓ Resultado guardado y puntos calculados");
-    setMatchId(""); setGL(""); setGV(""); setSaving(false); setConfirmCorregir(false);
+    setMsg("✓ Resultado guardado y puntos calculados");
+    setMatchId(""); setGL(""); setGV(""); setSaving(false);
     setTimeout(()=>setMsg(""),4000);
   }
 
   return (
     <div style={{ background:"white", borderRadius:12, border:"0.5px solid #e0ddd5", padding:14, marginBottom:10 }}>
-      <div style={{ fontSize:12, fontWeight:600, color:BORDO, marginBottom:10 }}>✏️ Cargar / corregir resultado</div>
+      <div style={{ fontSize:12, fontWeight:600, color:BORDO, marginBottom:10 }}>✏️ Cargar resultado</div>
       <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
         <div><div style={{ fontSize:10, color:"#888", marginBottom:3 }}>Partido</div>
-          <select value={matchId} onChange={e=>elegirPartido(e.target.value)} style={{...inputStyle(),padding:"0 6px"}}>
+          <select value={matchId} onChange={e=>setMatchId(e.target.value)} style={{...inputStyle(),padding:"0 6px"}}>
             <option value="">Seleccioná un partido...</option>
-            {partidos.map(p=>{
-              const tiene = p.gL !== undefined && p.gL !== null;
-              return <option key={p.id} value={p.id}>
-                {tiene ? "✓ " : ""}{p.localN} vs {p.visitaN} ({p.fecha}){tiene ? ` — ${p.gL}-${p.gV}` : ""}
-              </option>;
-            })}
+            {sinResultado.map(p=><option key={p.id} value={p.id}>{p.localN} vs {p.visitaN} ({p.fecha})</option>)}
           </select></div>
-
-        {yaTieneResultado && (
-          <div style={{ background:"#fff8e1", border:"0.5px solid #f57f17", borderRadius:6,
-            padding:"8px 10px", fontSize:11, color:"#f57f17" }}>
-            ⚠️ Este partido ya tiene resultado cargado ({partidoSeleccionado.gL}-{partidoSeleccionado.gV}).
-            Si lo cambiás, se revierten los puntos anteriores y se recalculan con el nuevo marcador.
-          </div>
-        )}
-
         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
           <div><div style={{ fontSize:10, color:"#888", marginBottom:3 }}>Goles local</div>
-            <input type="number" min="0" max="20" value={gL} onChange={e=>{setGL(e.target.value); setConfirmCorregir(false);}} placeholder="0" style={{...inputStyle(),textAlign:"center"}} /></div>
+            <input type="number" min="0" max="20" value={gL} onChange={e=>setGL(e.target.value)} placeholder="0" style={{...inputStyle(),textAlign:"center"}} /></div>
           <div><div style={{ fontSize:10, color:"#888", marginBottom:3 }}>Goles visitante</div>
-            <input type="number" min="0" max="20" value={gV} onChange={e=>{setGV(e.target.value); setConfirmCorregir(false);}} placeholder="0" style={{...inputStyle(),textAlign:"center"}} /></div>
+            <input type="number" min="0" max="20" value={gV} onChange={e=>setGV(e.target.value)} placeholder="0" style={{...inputStyle(),textAlign:"center"}} /></div>
         </div>
-
-        {yaTieneResultado && !confirmCorregir ? (
-          <button onClick={()=>setConfirmCorregir(true)} disabled={!matchId||gL===""||gV===""}
-            style={{ background:"#f57f17", color:"white", border:"none", borderRadius:6, padding:10, fontSize:13, fontWeight:600, opacity:(!matchId||gL===""||gV==="")?0.4:1 }}>
-            Confirmar corrección de resultado
-          </button>
-        ) : (
-          <button onClick={guardar} disabled={saving||!matchId||gL===""||gV===""} style={{ background:BORDO, color:MARFIL, border:"none", borderRadius:6, padding:10, fontSize:13, fontWeight:600, opacity:(!matchId||gL===""||gV==="")?0.4:1 }}>
-            {saving?"Guardando...":(yaTieneResultado ? "Sí, corregir y recalcular" : "Guardar resultado")}</button>
-        )}
-        {yaTieneResultado && confirmCorregir && (
-          <button onClick={()=>setConfirmCorregir(false)} style={{ background:"none", border:"1px solid #ccc", borderRadius:6, padding:8, fontSize:11, color:"#666" }}>
-            Cancelar corrección
-          </button>
-        )}
+        <button onClick={guardar} disabled={saving||!matchId||gL===""||gV===""} style={{ background:BORDO, color:MARFIL, border:"none", borderRadius:6, padding:10, fontSize:13, fontWeight:600, opacity:(!matchId||gL===""||gV==="")?0.4:1 }}>
+          {saving?"Guardando...":"Guardar resultado"}</button>
         {msg&&<div style={{ color:VERDE, fontSize:12, textAlign:"center" }}>{msg}</div>}
         <button onClick={onClose} style={{ background:"none", border:"none", fontSize:11, color:"#888" }}>Cerrar</button>
       </div>
@@ -1759,8 +1799,303 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
   const [confirmCerrarJornada, setConfirmCerrarJornada] = useState(false);
   const [confirmReinicio, setConfirmReinicio] = useState(false);
   const [lockHoras, setLockHoras] = useState("1");
+  const [lockHorasGuardado, setLockHorasGuardado] = useState("1");
+  const [guardandoLock, setGuardandoLock] = useState(false);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    getDoc(doc(db, "config", "app")).then(snap => {
+      if (snap.exists() && snap.data().lockHoras !== undefined) {
+        const val = String(snap.data().lockHoras);
+        setLockHoras(val);
+        setLockHorasGuardado(val);
+      }
+    });
+  }, []);
+
+  async function guardarLockHoras() {
+    setGuardandoLock(true);
+    await setDoc(doc(db, "config", "app"), { lockHoras: Number(lockHoras) }, { merge: true });
+    setLockHorasGuardado(lockHoras);
+    setGuardandoLock(false);
+  }
+
+  const [diagnosticando, setDiagnosticando] = useState(false);
+  const [diagnosticoResultado, setDiagnosticoResultado] = useState<any[]|null>(null);
+  const [partidosAfectadosResumen, setPartidosAfectadosResumen] = useState<any[]>([]);
+
+  const [exportando, setExportando] = useState(false);
+
+  async function exportarCSVCompleto() {
+    setExportando(true);
+    try {
+      const primerPartidoSnap = await getDoc(doc(db, "partidos", "mgpUr5zbxrVJZHGBEN97"));
+      const fechaCorte = primerPartidoSnap.exists() ? (primerPartidoSnap.data().fecha || "") : "";
+
+      const partidosSnap = await getDocs(query(collection(db, "partidos"), orderBy("fecha"), orderBy("hora")));
+      const partidosInfo: Record<string, { gL:number, gV:number, localN:string, visitaN:string, fecha:string, hora:string, esSimulacion:boolean }> = {};
+      partidosSnap.docs.forEach(d => {
+        const p = d.data();
+        if (p.gL !== null && p.gL !== undefined && p.gV !== null && p.gV !== undefined) {
+          const esSimulacion = !!(fechaCorte && p.fecha && p.fecha < fechaCorte);
+          partidosInfo[d.id] = { gL:p.gL, gV:p.gV, localN:p.localN||"", visitaN:p.visitaN||"", fecha:p.fecha||"", hora:p.hora||"", esSimulacion };
+        }
+      });
+
+      const pronosSnap = await getDocs(collection(db, "pronosticos"));
+      const porUsuario: Record<string, any[]> = {};
+      pronosSnap.docs.forEach(d => {
+        const data = d.data();
+        if (!porUsuario[data.userId]) porUsuario[data.userId] = [];
+        porUsuario[data.userId].push({ docId: d.id, ...data });
+      });
+
+      const usuariosSnap = await getDocs(collection(db, "usuarios"));
+      const filas: string[] = [];
+      filas.push([
+        "Jugador","Fecha","Local","Visitante","Pronostico","ResultadoReal",
+        "PtsDeberiaValer","PtsGuardado","Calculado","Coincide","EsSimulacion","MatchId"
+      ].join(","));
+
+      usuariosSnap.docs.forEach(d => {
+        const ud = d.data();
+        const nick = (ud.nick || "Sin nick").replace(/,/g, " ");
+        const misPronos = porUsuario[d.id] || [];
+
+        Object.entries(partidosInfo).forEach(([matchId, info]) => {
+          const prono = misPronos.find(p => p.matchId === matchId);
+          const tienePronostico = prono && prono.mL !== null && prono.mL !== undefined && prono.mV !== null && prono.mV !== undefined;
+
+          const ptsCorrectos = tienePronostico ? (calcPtsNuevo(info.gL, info.gV, prono.mL, prono.mV) ?? 0) : 0;
+          const ptsGuardado = tienePronostico ? (prono.pts ?? "null") : "sin pronostico";
+          const calculado = tienePronostico ? String(!!prono.calculado) : "-";
+          // Si es partido de simulacion, no se considera ERROR aunque no coincida (se excluye a proposito del recalculo)
+          const coincide = !tienePronostico ? "-" : info.esSimulacion ? "N/A (simulacion)" : (ptsCorrectos === prono.pts ? "OK" : "ERROR");
+          const miPronostico = tienePronostico ? `${prono.mL}-${prono.mV}` : "-";
+
+          filas.push([
+            nick, info.fecha, info.localN.replace(/,/g," "), info.visitaN.replace(/,/g," "),
+            miPronostico, `${info.gL}-${info.gV}`,
+            tienePronostico ? String(ptsCorrectos) : "-",
+            String(ptsGuardado), calculado, coincide, String(info.esSimulacion), matchId
+          ].join(","));
+        });
+      });
+
+      const csvContent = filas.join("\n");
+      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `diagnostico_puntos_${new Date().toISOString().slice(0,10)}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert("Error al exportar, probá de nuevo");
+    }
+    setExportando(false);
+  }
+
+  async function diagnosticarPuntos() {
+    setDiagnosticando(true);
+    setDiagnosticoResultado(null);
+    try {
+      // Misma fecha de corte que usa recalcularAciertoHistorico, para no marcar como
+      // "error" los partidos de simulacion/prueba que intencionalmente no se recalculan.
+      const primerPartidoSnap = await getDoc(doc(db, "partidos", "mgpUr5zbxrVJZHGBEN97"));
+      const fechaCorte = primerPartidoSnap.exists() ? (primerPartidoSnap.data().fecha || "") : "";
+
+      // Mapa de resultados reales por matchId (solo partidos posteriores al corte)
+      const partidosSnap = await getDocs(collection(db, "partidos"));
+      const resultadosReales: Record<string, { gL:number, gV:number }> = {};
+      partidosSnap.docs.forEach(d => {
+        const p = d.data();
+        if (p.gL !== null && p.gL !== undefined && p.gV !== null && p.gV !== undefined) {
+          if (fechaCorte && p.fecha && p.fecha < fechaCorte) return; // descarta partidos de simulacion previos
+          resultadosReales[d.id] = { gL: p.gL, gV: p.gV };
+        }
+      });
+
+      // Todos los pronosticos, agrupados por usuario
+      const pronosSnap = await getDocs(collection(db, "pronosticos"));
+      const porUsuario: Record<string, any[]> = {};
+      pronosSnap.docs.forEach(d => {
+        const data = d.data();
+        if (!porUsuario[data.userId]) porUsuario[data.userId] = [];
+        porUsuario[data.userId].push({ docId: d.id, ...data });
+      });
+
+      const usuariosSnap = await getDocs(collection(db, "usuarios"));
+      const reporte: any[] = [];
+
+      usuariosSnap.docs.forEach(d => {
+        const ud = d.data();
+        const misPronos = porUsuario[d.id] || [];
+        const inconsistencias: any[] = [];
+
+        misPronos.forEach(prono => {
+          const real = resultadosReales[prono.matchId];
+          if (!real) return; // el partido no tiene resultado todavia, no corresponde comparar
+          if (prono.mL === null || prono.mL === undefined || prono.mV === null || prono.mV === undefined) return; // no pronostico marcador
+
+          const ptsCorrectos = calcPtsNuevo(real.gL, real.gV, prono.mL, prono.mV) ?? 0;
+          const ptsGuardadoEnPronostico = prono.pts ?? null;
+
+          // Comparamos lo que DEBERIA valer este pronostico contra lo que tiene guardado
+          if (ptsCorrectos !== ptsGuardadoEnPronostico) {
+            inconsistencias.push({
+              matchId: prono.matchId,
+              miPronostico: `${prono.mL}-${prono.mV}`,
+              resultadoReal: `${real.gL}-${real.gV}`,
+              ptsQueDeberiaTener: ptsCorrectos,
+              ptsQueTieneGuardado: ptsGuardadoEnPronostico,
+              calculado: !!prono.calculado,
+            });
+          }
+        });
+
+        if (inconsistencias.length > 0) {
+          const sumaCorrecta = misPronos.reduce((acc, prono) => {
+            const real = resultadosReales[prono.matchId];
+            if (!real || prono.mL === null || prono.mL === undefined || prono.mV === null || prono.mV === undefined) return acc;
+            return acc + (calcPtsNuevo(real.gL, real.gV, prono.mL, prono.mV) ?? 0);
+          }, 0);
+
+          reporte.push({
+            userId: d.id, nick: ud.nick || "Sin nick",
+            ptsGuardado: ud.pts || 0,
+            sumaCorrecta,
+            inconsistencias,
+          });
+        }
+      });
+
+      // Resumen agrupado por matchId: cuantos usuarios distintos afecta cada partido problematico
+      const porPartido: Record<string, { afectados:number, nombres:string[] }> = {};
+      reporte.forEach(r => {
+        r.inconsistencias.forEach((inc:any) => {
+          if (!porPartido[inc.matchId]) porPartido[inc.matchId] = { afectados:0, nombres:[] };
+          porPartido[inc.matchId].afectados++;
+          porPartido[inc.matchId].nombres.push(r.nick);
+        });
+      });
+      setPartidosAfectadosResumen(Object.entries(porPartido).map(([matchId, info]) => ({ matchId, ...info })));
+
+      setDiagnosticoResultado(reporte);
+    } catch (e) {
+      setDiagnosticoResultado([{ error: "Error al diagnosticar, probá de nuevo" }]);
+    }
+    setDiagnosticando(false);
+  }
+
+  const [reparando, setReparando] = useState(false);
+  const [reparandoMsg, setReparandoMsg] = useState("");
+
+  async function repararPartidosDetectados() {
+    if (partidosAfectadosResumen.length === 0) return;
+    setReparando(true);
+    setReparandoMsg("");
+    try {
+      // IMPORTANTE: NO usar calcularPuntosPartido aca (es aditiva, pensada para correr
+      // una sola vez por partido nuevo - si se vuelve a ejecutar sobre un partido ya
+      // procesado, duplica los puntos de TODOS los usuarios, no solo los afectados).
+      // En su lugar, recalculamos todo desde cero con recalcularAciertoHistorico,
+      // que es determinístico e idempotente: da el mismo resultado sin importar
+      // cuantas veces se ejecute.
+      await recalcularAciertoHistorico();
+      setReparandoMsg(`✓ Recalculado desde cero. Volvé a diagnosticar para confirmar.`);
+      setPartidosAfectadosResumen([]);
+      setDiagnosticoResultado(null);
+    } catch (e) {
+      setReparandoMsg("✗ Error al reparar, probá de nuevo");
+    }
+    setReparando(false);
+  }
+
+  const [recalculando, setRecalculando] = useState(false);
+  const [recalculoMsg, setRecalculoMsg] = useState("");
+
+  async function recalcularAciertoHistorico() {
+    setRecalculando(true);
+    setRecalculoMsg("");
+    try {
+      // Fecha de corte: excluye partidos de prueba/simulacion anteriores al primer partido real
+      const primerPartidoSnap = await getDoc(doc(db, "partidos", "mgpUr5zbxrVJZHGBEN97"));
+      const fechaCorte = primerPartidoSnap.exists() ? (primerPartidoSnap.data().fecha || "") : "";
+
+      const partidosSnap = await getDocs(query(collection(db, "partidos"), orderBy("fecha"), orderBy("hora")));
+      const partidosOrdenados: { id:string, gL:number, gV:number }[] = [];
+      partidosSnap.docs.forEach(d => {
+        const p = d.data();
+        if (p.gL !== null && p.gL !== undefined && p.gV !== null && p.gV !== undefined) {
+          if (fechaCorte && p.fecha && p.fecha < fechaCorte) return; // descarta partidos de simulacion previos
+          partidosOrdenados.push({ id: d.id, gL: p.gL, gV: p.gV });
+        }
+      });
+      const totalPartidosConResultado = partidosOrdenados.length;
+
+      const pronosSnap = await getDocs(collection(db, "pronosticos"));
+      const pronosPorUsuario: Record<string, Record<string, {mL:number, mV:number, docRef:any}>> = {};
+      pronosSnap.docs.forEach(d => {
+        const { userId, matchId, mL, mV } = d.data();
+        if (mL === null || mV === null || mL === undefined || mV === undefined) return;
+        if (!pronosPorUsuario[userId]) pronosPorUsuario[userId] = {};
+        pronosPorUsuario[userId][matchId] = { mL, mV, docRef: d.ref };
+      });
+
+      const usuariosSnap = await getDocs(collection(db, "usuarios"));
+      const escriturasPronosticos: Promise<any>[] = [];
+
+      await Promise.all(usuariosSnap.docs.map(d => {
+        const misPronos = pronosPorUsuario[d.id] || {};
+        let golesAcertados = 0, golesPronosticados = 0, exactos = 0, aciertosResultado = 0;
+        let rachaActual = 0, rachaMasLarga = 0, ceroRacha = 0, pts = 0;
+
+        // Recorre en orden cronologico para que las rachas (consecutivos) y pts sean correctos
+        partidosOrdenados.forEach(real => {
+          const prono = misPronos[real.id];
+          const tienePronostico = !!prono;
+          const ptsPartido = tienePronostico ? (calcPtsNuevo(real.gL, real.gV, prono.mL, prono.mV) ?? 0) : 0;
+          pts += ptsPartido;
+
+          if (tienePronostico) {
+            golesPronosticados += 2;
+            if (prono.mL === real.gL) golesAcertados++;
+            if (prono.mV === real.gV) golesAcertados++;
+            if (ptsPartido >= 1) aciertosResultado++;
+            // Sincroniza el pts guardado en el documento del pronostico individual,
+            // que es justo lo que el diagnostico (y el desglose x3/x2/x1) compara/cuenta.
+            escriturasPronosticos.push(setDoc(prono.docRef, { pts: ptsPartido, calculado: true }, { merge:true }));
+          }
+          if (ptsPartido === 3) { exactos++; rachaActual++; } else { rachaActual = 0; }
+          rachaMasLarga = Math.max(rachaMasLarga, rachaActual);
+          ceroRacha = ptsPartido === 0 ? ceroRacha + 1 : 0;
+        });
+
+        const acierto = golesPronosticados > 0 ? Math.round((golesAcertados/golesPronosticados)*100) : 0;
+        const pctExactos = totalPartidosConResultado > 0 ? Math.round((exactos/totalPartidosConResultado)*100) : 0;
+        const pctAciertoResultado = totalPartidosConResultado > 0 ? Math.round((aciertosResultado/totalPartidosConResultado)*100) : 0;
+
+        return setDoc(d.ref, {
+          pts, golesAcertados, golesPronosticados, acierto,
+          partidosConResultado: totalPartidosConResultado,
+          aciertosResultado, pctExactos, pctAciertoResultado,
+          rachaActual, rachaMasLarga, ceroRacha,
+        }, { merge:true });
+      }));
+
+      // Espera a que todos los pronosticos individuales queden sincronizados con su pts real
+      await Promise.all(escriturasPronosticos);
+
+      setRecalculoMsg(`✓ Recalculado para ${usuariosSnap.docs.length} jugadores`);
+    } catch (e) {
+      setRecalculoMsg("✗ Error al recalcular, probá de nuevo");
+    }
+    setRecalculando(false);
+  }
 
   useEffect(() => {
     const q = query(collection(db,"partidos"), orderBy("fecha"), orderBy("hora"));
@@ -1780,6 +2115,11 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
   }
 
   async function eliminar(id: string) {
+    // Borrado en cascada: si el partido se elimina, sus pronosticos asociados quedarian
+    // huerfanos (con pts ya calculado pero apuntando a un matchId que no existe mas),
+    // contaminando el desglose x3/x2/x1 a futuro. Los borramos junto con el partido.
+    const pronosSnap = await getDocs(query(collection(db, "pronosticos"), where("matchId", "==", id)));
+    await Promise.all(pronosSnap.docs.map(d => deleteDoc(d.ref)));
     await deleteDoc(doc(db,"partidos",id));
     setConfirmDelete(null); setMsg("Partido eliminado");
     setTimeout(()=>setMsg(""),3000);
@@ -1788,8 +2128,10 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
   async function borrarTodo() {
     setLoading(true);
     const snap = await getDocs(collection(db,"partidos"));
+    const pronosSnap = await getDocs(collection(db, "pronosticos"));
+    await Promise.all(pronosSnap.docs.map(d => deleteDoc(d.ref))); // borra todos los pronosticos primero
     for (const d of snap.docs) await deleteDoc(doc(db,"partidos",d.id));
-    setConfirmBorrarTodo(false); setMsg("✓ Todos los partidos eliminados.");
+    setConfirmBorrarTodo(false); setMsg("✓ Todos los partidos y sus pronósticos eliminados.");
     setLoading(false); setTimeout(()=>setMsg(""),3000);
   }
 
@@ -1797,7 +2139,7 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
     setLoading(true);
     const snap = await getDocs(collection(db, "usuarios"));
     for (const d of snap.docs) {
-      await setDoc(d.ref, { pts:0, hoy:0, mov:0, rachaActual:0, rachaMasLarga:0, exactos:0, acierto:0, pos:0 }, { merge:true });
+      await setDoc(d.ref, { pts:0, hoy:0, mov:0, rachaActual:0, rachaMasLarga:0, exactos:0, acierto:0, golesAcertados:0, golesPronosticados:0, ceroRacha:0, partidosConResultado:0, aciertosResultado:0, pctExactos:0, pctAciertoResultado:0, pos:0 }, { merge:true });
     }
     setConfirmReinicio(false);
     setMsg("✓ Puntuación reiniciada para todos.");
@@ -1828,7 +2170,7 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
     const blob = new Blob(["\uFEFF" + rows.join("\n")], { type:"text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = "prode_resultados.csv";
+    a.href = url; a.download = "ecfc_prode_resultados.csv";
     a.click(); URL.revokeObjectURL(url);
     setMsg("✓ CSV descargado");
     setTimeout(() => setMsg(""), 3000);
@@ -1948,7 +2290,128 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
                 <option value="1">1 hora</option><option value="2">2 horas</option>
                 <option value="3">3 horas</option><option value="0">Al inicio</option>
               </select>
+              {lockHoras !== lockHorasGuardado && (
+                <button onClick={guardarLockHoras} disabled={guardandoLock}
+                  style={{ background:BORDO, color:MARFIL, border:"none", borderRadius:5,
+                    padding:"5px 10px", fontSize:11, fontWeight:600, cursor:"pointer",
+                    opacity:guardandoLock?0.6:1 }}>
+                  {guardandoLock ? "..." : "Guardar"}
+                </button>
+              )}
             </div>
+            {lockHoras === lockHorasGuardado && (
+              <div style={{ padding:"0 14px 10px", fontSize:10, color:VERDE }}>✓ Guardado, aplica a todos los partidos</div>
+            )}
+          </div>
+
+          <div style={{ background:"white", borderRadius:12, border:"0.5px solid #e0ddd5", overflow:"hidden", marginBottom:10 }}>
+            <div style={{ background:BORDO_DARK, padding:"8px 12px" }}><span style={{ color:MARFIL, fontSize:12, fontWeight:600 }}>🔍 Diagnóstico (solo lectura)</span></div>
+            <div style={{ display:"flex", alignItems:"center", gap:10, padding:"11px 14px" }}>
+              <span style={{ fontSize:16 }}>🩺</span>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:12, fontWeight:500 }}>Detectar puntos desincronizados</div>
+                <div style={{ fontSize:10, color:"#888" }}>Compara la suma real de pronósticos vs el total guardado</div>
+              </div>
+              <button onClick={diagnosticarPuntos} disabled={diagnosticando}
+                style={{ background:BORDO, color:MARFIL, border:"none", borderRadius:5,
+                  padding:"6px 10px", fontSize:11, fontWeight:600, cursor:"pointer",
+                  opacity:diagnosticando?0.6:1, whiteSpace:"nowrap" }}>
+                {diagnosticando ? "Revisando..." : "Diagnosticar"}
+              </button>
+            </div>
+            <div style={{ display:"flex", alignItems:"center", gap:10, padding:"0 14px 11px" }}>
+              <span style={{ fontSize:16 }}>📄</span>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:12, fontWeight:500 }}>Exportar CSV completo</div>
+                <div style={{ fontSize:10, color:"#888" }}>Todos los pronósticos vs resultados, jugador por jugador</div>
+              </div>
+              <button onClick={exportarCSVCompleto} disabled={exportando}
+                style={{ background:BORDO_DARK, color:MARFIL, border:"none", borderRadius:5,
+                  padding:"6px 10px", fontSize:11, fontWeight:600, cursor:"pointer",
+                  opacity:exportando?0.6:1, whiteSpace:"nowrap" }}>
+                {exportando ? "Generando..." : "Descargar CSV"}
+              </button>
+            </div>
+            {partidosAfectadosResumen.length > 0 && (
+              <div style={{ padding:"0 14px 10px" }}>
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:6 }}>
+                  <div style={{ fontSize:11, fontWeight:600, color:BORDO }}>
+                    📋 Resumen: {partidosAfectadosResumen.length} partido{partidosAfectadosResumen.length>1?"s":""} con problemas
+                  </div>
+                  <button onClick={repararPartidosDetectados} disabled={reparando}
+                    style={{ background:VERDE, color:MARFIL, border:"none", borderRadius:5,
+                      padding:"5px 9px", fontSize:10, fontWeight:600, cursor:"pointer",
+                      opacity:reparando?0.6:1, whiteSpace:"nowrap" }}>
+                    {reparando ? "Reparando..." : "🔧 Reparar"}
+                  </button>
+                </div>
+                {partidosAfectadosResumen.map((p:any, i:number) => (
+                  <div key={i} style={{ fontSize:10, color:"#555", marginBottom:4, padding:6,
+                    background:"#fff", borderRadius:6, border:"0.5px solid #e0ddd5" }}>
+                    <b>{p.matchId}</b> → afecta a {p.afectados} jugador{p.afectados>1?"es":""}: {p.nombres.join(", ")}
+                  </div>
+                ))}
+                {reparandoMsg && (
+                  <div style={{ fontSize:10, color:reparandoMsg.startsWith("✓")?VERDE:ROJO, marginTop:4 }}>{reparandoMsg}</div>
+                )}
+              </div>
+            )}
+            {diagnosticoResultado && diagnosticoResultado.length === 0 && (
+              <div style={{ padding:"0 14px 12px", fontSize:11, color:VERDE }}>✓ Todo coincide, no se encontraron desincronizaciones</div>
+            )}
+            {diagnosticoResultado && diagnosticoResultado.length > 0 && (
+              <div style={{ padding:"0 14px 12px" }}>
+                {diagnosticoResultado.map((r:any, i:number) => (
+                  <div key={i} style={{ background:MARFIL_LIGHT, borderRadius:8, padding:10, marginBottom:8,
+                    border:"0.5px solid #e0ddd5" }}>
+                    {r.error
+                      ? <div style={{ fontSize:11, color:ROJO }}>{r.error}</div>
+                      : (
+                        <>
+                          <div style={{ fontSize:12, fontWeight:600, color:BORDO }}>{r.nick}</div>
+                          <div style={{ fontSize:11, color:"#555", marginTop:2 }}>
+                            Guardado: <b>{r.ptsGuardado}</b> · Debería tener: <b style={{color:VERDE}}>{r.sumaCorrecta}</b>
+                          </div>
+                          <div style={{ fontSize:10, fontWeight:600, color:ROJO, marginTop:6 }}>
+                            Partidos con inconsistencia ({r.inconsistencias.length}):
+                          </div>
+                          {r.inconsistencias.map((inc:any, j:number) => (
+                            <div key={j} style={{ fontSize:10, color:"#555", marginTop:4, paddingLeft:6,
+                              borderLeft:`2px solid ${ROJO}` }}>
+                              matchId: {inc.matchId}<br/>
+                              Pronosticó <b>{inc.miPronostico}</b> · Resultado real <b>{inc.resultadoReal}</b><br/>
+                              Debería valer <b style={{color:VERDE}}>{inc.ptsQueDeberiaTener}pt</b> ·
+                              Tiene guardado <b style={{color:ROJO}}>{String(inc.ptsQueTieneGuardado)}pt</b> ·
+                              calculado: {String(inc.calculado)}
+                            </div>
+                          ))}
+                        </>
+                      )
+                    }
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{ background:"white", borderRadius:12, border:"0.5px solid #e0ddd5", overflow:"hidden", marginBottom:10 }}>
+            <div style={{ background:BORDO_DARK, padding:"8px 12px" }}><span style={{ color:MARFIL, fontSize:12, fontWeight:600 }}>🎯 Estadísticas</span></div>
+            <div style={{ display:"flex", alignItems:"center", gap:10, padding:"11px 14px" }}>
+              <span style={{ fontSize:16 }}>📊</span>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:12, fontWeight:500 }}>Estadísticas de acierto</div>
+                <div style={{ fontSize:10, color:"#888" }}>Recalcula puntos, % goles, % exactos y % acierto desde cero, excluyendo partidos de prueba</div>
+              </div>
+              <button onClick={recalcularAciertoHistorico} disabled={recalculando}
+                style={{ background:BORDO, color:MARFIL, border:"none", borderRadius:5,
+                  padding:"6px 10px", fontSize:11, fontWeight:600, cursor:"pointer",
+                  opacity:recalculando?0.6:1, whiteSpace:"nowrap" }}>
+                {recalculando ? "Calculando..." : "Recalcular"}
+              </button>
+            </div>
+            {recalculoMsg && (
+              <div style={{ padding:"0 14px 10px", fontSize:10, color:recalculoMsg.startsWith("✓")?VERDE:ROJO }}>{recalculoMsg}</div>
+            )}
           </div>
 
           <div style={{ background:"white", borderRadius:12, border:"0.5px solid #e0ddd5", overflow:"hidden", marginBottom:10 }}>
@@ -2020,13 +2483,214 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
 }
 
 
+// Overlay de racha: "fuego" si rachaActual>=3 (exactos seguidos), "hielo" si ceroRacha>=3 (0pts seguidos)
+// Juega 1 vez al montar (key cambia cuando cambia el tipo de racha) y deja un pulso permanente en el borde.
+function RachaOverlay({ tipo, size }: { tipo: "fuego"|"hielo"|null, size: number }) {
+  const [playing, setPlaying] = useState(true);
+  useEffect(() => {
+    setPlaying(true);
+    const t = setTimeout(() => setPlaying(false), 1500);
+    return () => clearTimeout(t);
+  }, [tipo]);
+
+  if (!tipo) return null;
+
+  const isFuego = tipo === "fuego";
+  const pulseColor = isFuego ? "#ff5a14" : "#bfe3ff";
+  const ringShadow = isFuego ? "rgba(255,90,20,0.55)" : "rgba(190,225,255,0.85)";
+
+  return (
+    <>
+      <style>{`
+        @keyframes rachaShardFloat {
+          0% { opacity:0; transform: translateY(0) scale(0.6) rotate(0deg); }
+          15% { opacity:1; }
+          100% { opacity:0; transform: translateY(-${size*0.3}px) scale(1.1) rotate(25deg); }
+        }
+        @keyframes rachaFlameUp {
+          0% { opacity:0; transform: translateY(${size*0.1}px) scale(0.3) rotate(0deg); }
+          20% { opacity:1; transform: translateY(${size*0.02}px) scale(0.85) rotate(-3deg); }
+          45% { transform: translateY(-${size*0.07}px) scale(1.05) rotate(3deg); }
+          70% { transform: translateY(-${size*0.19}px) scale(1) rotate(-2deg); opacity:0.9; }
+          100% { opacity:0; transform: translateY(-${size*0.38}px) scale(0.55) rotate(4deg); }
+        }
+        @keyframes rachaIceIn {
+          from { opacity:0; } to { opacity:1; }
+        }
+        @keyframes rachaIceOut {
+          from { opacity:1; } to { opacity:0; }
+        }
+        @keyframes rachaPulse {
+          0%, 100% { box-shadow: 0 0 0px 0px transparent; border-color:${BORDO}; }
+          50% { box-shadow: 0 0 ${size*0.18}px ${size*0.06}px ${ringShadow}; border-color:${pulseColor}; }
+        }
+        .racha-pulse-${tipo} { animation: rachaPulse 1.8s ease-in-out infinite; }
+      `}</style>
+      <div className={`racha-pulse-${tipo}`} style={{ position:"absolute", inset:0, borderRadius:"50%", pointerEvents:"none" }} />
+      {playing && isFuego && (
+        <div style={{ position:"absolute", inset:-size*0.15, borderRadius:"50%", pointerEvents:"none", zIndex:0 }}>
+          {[0, 0.06, 0.12].map((delay, i) => {
+            const w = size * (i===1 ? 0.22 : 0.16);
+            const h = size * (i===1 ? 0.4 : 0.3);
+            const left = size * (i===0 ? 0.05 : i===1 ? 0.4 : 0.75) - w/2;
+            return (
+              <div key={i} style={{
+                position:"absolute", bottom:1, left, width:w, height:h,
+                opacity:0, transformOrigin:"bottom center",
+                animation:`rachaFlameUp 1.3s ease-out ${delay}s forwards`,
+              }}>
+                <div style={{ position:"absolute", inset:0, borderRadius:"50% 50% 50% 50% / 65% 65% 35% 35%",
+                  background:"linear-gradient(180deg, #ff3d00 0%, #ff7a1a 55%, #ffb238 100%)",
+                  clipPath:"polygon(50% 0%, 78% 22%, 92% 55%, 78% 85%, 50% 100%, 22% 85%, 8% 55%, 22% 22%)" }} />
+                <div style={{ position:"absolute", width:"55%", height:"55%", left:"22.5%", top:"38%",
+                  background:"radial-gradient(ellipse at 50% 70%, #fff3b0 0%, #ffe066 50%, transparent 100%)",
+                  borderRadius:"50%" }} />
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {playing && !isFuego && (
+        <div style={{
+          position:"absolute", inset:0, borderRadius:"50%", pointerEvents:"none", zIndex:0,
+          background:"radial-gradient(circle at 35% 30%, rgba(200,235,255,0.55) 0%, rgba(150,210,250,0.45) 45%, rgba(120,190,245,0.35) 100%)",
+          boxShadow:"inset 0 0 12px rgba(255,255,255,0.8)",
+          animation:"rachaIceIn 0.3s ease-out forwards, rachaIceOut 0.4s ease-in 1.0s forwards",
+        }}>
+          {["❄","❅"].map((s,i) => (
+            <span key={i} style={{
+              position:"absolute", fontSize:size*0.18,
+              left: i===0 ? size*0.08 : undefined, right: i===1 ? size*0.05 : undefined,
+              top: i===0 ? size*0.12 : size*0.3, opacity:0,
+              animation:`rachaShardFloat 1.3s ease-out ${i*0.08}s forwards`,
+            }}>{s}</span>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function tipoRacha(ud: any): "fuego"|"hielo"|null {
+  if (!ud) return null;
+  if ((ud.rachaActual || 0) >= 3) return "fuego";
+  if ((ud.ceroRacha || 0) >= 3) return "hielo";
+  return null;
+}
+
+
+function PerfilAjeno({ uid, onBack }: { uid: string, onBack: ()=>void }) {
+  const [userData, setUserData] = useState<any>(null);
+
+  useEffect(() => {
+    return onSnapshot(doc(db,"usuarios",uid), snap => {
+      if (snap.exists()) setUserData(snap.data());
+    });
+  }, [uid]);
+
+  const ini = (userData?.nick||"U").slice(0,2).toUpperCase();
+
+  return (
+    <div style={{ padding:12, background:MARFIL_LIGHT, flex:1 }}>
+      <div onClick={onBack} style={{ display:"flex", alignItems:"center", gap:6, marginBottom:10, cursor:"pointer" }}>
+        <span style={{ fontSize:18, color:BORDO }}>‹</span>
+        <span style={{ fontSize:13, color:BORDO, fontWeight:500 }}>Volver a la tabla</span>
+      </div>
+
+      {!userData && (
+        <div style={{ padding:30, textAlign:"center", color:"#888", fontSize:12 }}>Cargando perfil...</div>
+      )}
+
+      {userData && (
+        <>
+          <div style={{ background:"white", borderRadius:12, border:"0.5px solid #e0ddd5",
+            padding:"20px 16px", marginBottom:10, display:"flex", flexDirection:"column",
+            alignItems:"center", gap:10 }}>
+            <div style={{ position:"relative", width:72, height:72, flexShrink:0 }}>
+              <div style={{ width:72, height:72, borderRadius:"50%", background:MARFIL,
+                border:`3px solid ${BORDO}`, overflow:"hidden", flexShrink:0, position:"relative", zIndex:1 }}>
+                {(userData.fotoPersonalizada || userData.photoURL)
+                  ? <img src={userData.fotoPersonalizada || userData.photoURL} alt="Foto" style={{ width:"100%", height:"100%", objectFit:"cover" }} />
+                  : <div style={{ width:"100%", height:"100%", display:"flex", alignItems:"center",
+                      justifyContent:"center", fontSize:26, fontWeight:600, color:BORDO }}>{ini}</div>
+                }
+              </div>
+              <RachaOverlay tipo={tipoRacha(userData)} size={72} />
+            </div>
+            <div style={{ fontSize:18, fontWeight:600, color:BORDO }}>{userData.nick||"Sin nick"}</div>
+
+            <div style={{ width:"100%", background:BORDO, borderRadius:8, padding:"10px 14px",
+              display:"flex", alignItems:"center", gap:10 }}>
+              <span style={{ fontSize:22 }}>🔥</span>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:11, color:MARFIL_DARK }}>Racha actual (exactos)</div>
+                <div style={{ fontSize:18, fontWeight:600, color:MARFIL }}>{userData.rachaActual||0} seguidos</div>
+              </div>
+              <div style={{ width:1, background:BORDO_LIGHT, height:36, margin:"0 4px" }}/>
+              <div style={{ textAlign:"center" }}>
+                <div style={{ fontSize:11, color:MARFIL_DARK }}>Racha más larga</div>
+                <div style={{ fontSize:18, fontWeight:600, color:MARFIL }}>{userData.rachaMasLarga||0}</div>
+              </div>
+            </div>
+
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, width:"100%" }}>
+              {[
+                { val:userData.pts||0, lbl:"Puntos totales" },
+                { val:userData.pos?`${userData.pos}°`:"—", lbl:"Posición actual" },
+                { val:userData.exactos||0, lbl:"Resultados exactos" },
+                { val:userData.acierto?`${userData.acierto}%`:"0%", lbl:"Acierto de goles" },
+                { val:userData.pctExactos?`${userData.pctExactos}%`:"0%", lbl:"% resultados exactos" },
+                { val:userData.pctAciertoResultado?`${userData.pctAciertoResultado}%`:"0%", lbl:"% acierto resultado" },
+              ].map(s=>(
+                <div key={s.lbl} style={{ background:MARFIL_LIGHT, borderRadius:8, padding:10,
+                  textAlign:"center", border:"0.5px solid #e0ddd5" }}>
+                  <div style={{ fontSize:20, fontWeight:600, color:BORDO }}>{s.val}</div>
+                  <div style={{ fontSize:10, color:"#888", marginTop:2 }}>{s.lbl}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+
 function TabPerfil({ user, onLogout, isAdmin }: { user:any, onLogout:()=>void, isAdmin:boolean }) {
   const [showAdmin, setShowAdmin] = useState(false);
   const [showPredicciones, setShowPredicciones] = useState(false);
   const [nick, setNick] = useState("");
   const [editingNick, setEditingNick] = useState(false);
   const [userData, setUserData] = useState<any>(null);
+  const [subiendoFoto, setSubiendoFoto] = useState(false);
+  const [errorFoto, setErrorFoto] = useState("");
   const ini = (nick||"U").slice(0,2).toUpperCase();
+  const fotoMostrada = userData?.fotoPersonalizada || user?.photoURL || "";
+
+  async function manejarCambioFoto(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !user) return;
+    if (!file.type.startsWith("image/")) {
+      setErrorFoto("Elegí un archivo de imagen");
+      return;
+    }
+    setErrorFoto("");
+    setSubiendoFoto(true);
+    try {
+      const base64 = await comprimirImagenAFoto(file, 200, 0.7);
+      if (base64.length > 700_000) {
+        setErrorFoto("La imagen quedó muy pesada, probá con otra foto");
+        setSubiendoFoto(false);
+        return;
+      }
+      await setDoc(doc(db, "usuarios", user.uid), { fotoPersonalizada: base64 }, { merge: true });
+    } catch (err) {
+      setErrorFoto("No se pudo procesar la imagen, probá de nuevo");
+    }
+    setSubiendoFoto(false);
+  }
 
   useEffect(() => {
     if (!user) return;
@@ -2049,18 +2713,35 @@ function TabPerfil({ user, onLogout, isAdmin }: { user:any, onLogout:()=>void, i
       <div style={{ background:"white", borderRadius:12, border:"0.5px solid #e0ddd5",
         padding:"20px 16px", marginBottom:10, display:"flex", flexDirection:"column",
         alignItems:"center", gap:10 }}>
-        <div style={{ width:72, height:72, borderRadius:"50%", background:MARFIL,
-          border:`3px solid ${BORDO}`, overflow:"hidden", flexShrink:0 }}>
-          {user?.photoURL
-            ? <img src={user.photoURL} alt="Foto" style={{ width:"100%", height:"100%", objectFit:"cover" }} />
-            : <div style={{ width:"100%", height:"100%", display:"flex", alignItems:"center",
-                justifyContent:"center", fontSize:26, fontWeight:600, color:BORDO }}>{ini}</div>
-          }
+        <div style={{ position:"relative", width:72, height:72, flexShrink:0 }}>
+          <div style={{ width:72, height:72, borderRadius:"50%", background:MARFIL,
+            border:`3px solid ${BORDO}`, overflow:"hidden", flexShrink:0, position:"relative", zIndex:1 }}>
+            {fotoMostrada
+              ? <img src={fotoMostrada} alt="Foto" style={{ width:"100%", height:"100%", objectFit:"cover" }} />
+              : <div style={{ width:"100%", height:"100%", display:"flex", alignItems:"center",
+                  justifyContent:"center", fontSize:26, fontWeight:600, color:BORDO }}>{ini}</div>
+            }
+            {subiendoFoto && (
+              <div style={{ position:"absolute", inset:0, background:"rgba(255,255,255,0.7)",
+                display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, color:BORDO, fontWeight:600 }}>
+                ...
+              </div>
+            )}
+          </div>
+          <RachaOverlay tipo={tipoRacha(userData)} size={72} />
+          <label style={{ position:"absolute", bottom:-2, right:-2, width:26, height:26, borderRadius:"50%",
+            background:BORDO, border:"2px solid white", display:"flex", alignItems:"center", justifyContent:"center",
+            cursor:"pointer", zIndex:3, fontSize:12 }}>
+            ✏️
+            <input type="file" accept="image/*" onChange={manejarCambioFoto} disabled={subiendoFoto}
+              style={{ display:"none" }} />
+          </label>
         </div>
+        {errorFoto && <div style={{ fontSize:11, color:ROJO }}>{errorFoto}</div>}
         {editingNick ? (
           <div style={{ display:"flex", gap:8, width:"100%" }}>
             <input value={nick} onChange={e=>setNick(e.target.value)} style={{ flex:1, ...inputStyle() }} />
-            <button onMouseDown={e => { e.preventDefault(); saveNick(); }} style={{ background:BORDO, color:MARFIL, border:"none", borderRadius:6, padding:"0 14px", fontSize:13, fontWeight:600 }}>OK</button>
+            <button onClick={saveNick} style={{ background:BORDO, color:MARFIL, border:"none", borderRadius:6, padding:"0 14px", fontSize:13, fontWeight:600 }}>OK</button>
           </div>
         ) : (
           <div onClick={()=>setEditingNick(true)} style={{ fontSize:18, fontWeight:600, color:BORDO, cursor:"pointer" }}>
@@ -2089,6 +2770,8 @@ function TabPerfil({ user, onLogout, isAdmin }: { user:any, onLogout:()=>void, i
             { val:userData?.pos?`${userData.pos}°`:"—", lbl:"Posición actual" },
             { val:userData?.exactos||0, lbl:"Resultados exactos" },
             { val:userData?.acierto?`${userData.acierto}%`:"0%", lbl:"Acierto de goles" },
+            { val:userData?.pctExactos?`${userData.pctExactos}%`:"0%", lbl:"% resultados exactos" },
+            { val:userData?.pctAciertoResultado?`${userData.pctAciertoResultado}%`:"0%", lbl:"% acierto resultado" },
           ].map(s=>(
             <div key={s.lbl} style={{ background:MARFIL_LIGHT, borderRadius:8, padding:10,
               textAlign:"center", border:"0.5px solid #e0ddd5" }}>
@@ -2141,8 +2824,25 @@ export default function App() {
   const [user, setUser] = useState<any>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAdmin, setIsAdmin] = useState(false);
-  const lockHoras = 1;
+  const [lockHoras, setLockHorasState] = useState(1);
   const [horaArt, setHoraArt] = useState(horaART());
+  const [viendoPerfilDe, setViendoPerfilDe] = useState<string|null>(null);
+  const [fotoPersonalizadaHeader, setFotoPersonalizadaHeader] = useState("");
+
+  useEffect(() => {
+    return onSnapshot(doc(db, "config", "app"), snap => {
+      if (snap.exists() && snap.data().lockHoras !== undefined) {
+        setLockHorasState(Number(snap.data().lockHoras));
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!user) { setFotoPersonalizadaHeader(""); return; }
+    return onSnapshot(doc(db, "usuarios", user.uid), snap => {
+      setFotoPersonalizadaHeader(snap.exists() ? (snap.data().fotoPersonalizada || "") : "");
+    });
+  }, [user]);
 
   useEffect(() => {
     const interval = setInterval(() => setHoraArt(horaART()), 30000);
@@ -2161,7 +2861,7 @@ export default function App() {
             ini: (u.displayName||"U").slice(0,2).toUpperCase(),
             email: u.email, photoURL: u.photoURL||"",
             pts:0, hoy:0, mov:0, rachaActual:0, rachaMasLarga:0,
-            exactos:0, acierto:0, createdAt:serverTimestamp()
+            exactos:0, acierto:0, golesAcertados:0, golesPronosticados:0, ceroRacha:0, partidosConResultado:0, aciertosResultado:0, pctExactos:0, pctAciertoResultado:0, createdAt:serverTimestamp()
           });
         } else {
           await setDoc(ref, { photoURL:u.photoURL||"" }, {merge:true});
@@ -2198,12 +2898,12 @@ export default function App() {
             <div style={{ color:MARFIL, fontSize:15, fontWeight:600 }}>El PRODE</div>
             
           </div>
-          <div onClick={()=>setActiveTab("perfil")} style={{ marginLeft:"auto", width:32, height:32,
+          <div onClick={()=>{ setActiveTab("perfil"); setViendoPerfilDe(null); }} style={{ marginLeft:"auto", width:32, height:32,
             background:BORDO_LIGHT, border:`2px solid ${MARFIL}`, borderRadius:"50%",
             overflow:"hidden", cursor:"pointer",
             display:"flex", alignItems:"center", justifyContent:"center" }}>
-            {user?.photoURL
-              ? <img src={user.photoURL} alt="avatar" style={{ width:"100%", height:"100%", objectFit:"cover" }} />
+            {(fotoPersonalizadaHeader || user?.photoURL)
+              ? <img src={fotoPersonalizadaHeader || user.photoURL} alt="avatar" style={{ width:"100%", height:"100%", objectFit:"cover" }} />
               : <span style={{ color:MARFIL, fontSize:12, fontWeight:600 }}>
                   {user?(user.displayName||"U").slice(0,2).toUpperCase():"?"}
                 </span>
@@ -2218,7 +2918,11 @@ export default function App() {
               ? <LoginScreen />
               : <>
                   {activeTab==="partidos"&&<TabPartidos userId={user.uid} lockHoras={lockHoras} />}
-                  {activeTab==="tabla"&&<TabTabla />}
+                  {activeTab==="tabla"&&(
+                    viendoPerfilDe
+                      ? <PerfilAjeno uid={viendoPerfilDe} onBack={()=>setViendoPerfilDe(null)} />
+                      : <TabTabla onSelectUser={(uid)=>setViendoPerfilDe(uid)} />
+                  )}
                   {activeTab==="tendencias"&&<TabTendencias />}
                   {activeTab==="perfil"&&<TabPerfil user={user} onLogout={handleLogout} isAdmin={isAdmin} />}
                 </>
@@ -2228,7 +2932,7 @@ export default function App() {
         <div style={{ background:"white", borderTop:"0.5px solid #eee",
           display:"flex", justifyContent:"space-around", padding:"8px 0 12px", flexShrink:0 }}>
           {tabs.map(t=>(
-            <button key={t.id} onClick={()=>setActiveTab(t.id)} style={{
+            <button key={t.id} onClick={()=>{ setActiveTab(t.id); setViendoPerfilDe(null); }} style={{
               display:"flex", flexDirection:"column", alignItems:"center", gap:3,
               background:"none", border:"none", padding:"4px 10px",
               color:activeTab===t.id?BORDO:"#aaa" }}>
